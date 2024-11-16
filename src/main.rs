@@ -1,7 +1,5 @@
 use tree_sitter::{InputEdit, Language, Parser, Point};
 
-
-
 fn main() {
     let mut parser = Parser::new();
     parser.set_language(&tree_sitter_haskell::LANGUAGE.into()).expect("Error loading Haskell grammar");
@@ -13,4 +11,3 @@ fn main() {
     println!("{}",ast_as_str);
 
 }
-
