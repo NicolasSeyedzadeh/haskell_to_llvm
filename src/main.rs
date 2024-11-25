@@ -1,6 +1,4 @@
-use inkwell::context::{self, Context};
-use inkwell::data_layout::{self, DataLayout};
-use inkwell::llvm_sys::target_machine;
+use inkwell::context::Context;
 use inkwell::targets::{Target, TargetMachine, TargetTriple};
 use inkwell::OptimizationLevel;
 use tree_sitter::{Parser, Tree};
@@ -14,7 +12,7 @@ fn main() {
     let context = Context::create();
     let module = context.create_module("my_module");
 
-    let target_triple = if triple == "" {
+    let target_triple = if triple.is_empty() {
         TargetMachine::get_default_triple()
     } else {
         TargetTriple::create(triple)
@@ -53,5 +51,5 @@ fn parse_to_ast(source_code: &str) -> Tree {
         .set_language(&tree_sitter_haskell::LANGUAGE.into())
         .expect("Error loading Haskell grammar");
 
-    return parser.parse(source_code, None).unwrap();
+    parser.parse(source_code, None).unwrap()
 }
