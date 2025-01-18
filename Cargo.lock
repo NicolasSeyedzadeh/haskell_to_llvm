@@ -32,6 +32,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "inkwell",
+ "regex",
  "tree-sitter",
  "tree-sitter-haskell",
 ]
