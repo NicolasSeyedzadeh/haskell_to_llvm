@@ -1,6 +1,6 @@
 use inkwell::context::Context;
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
-use inkwell::{builder, OptimizationLevel};
+use inkwell::OptimizationLevel;
 use std::fs;
 use tree_sitter::{Parser, Tree};
 mod function;
@@ -56,8 +56,8 @@ pub fn compile(source_path: &str) {
     }*/
     let code_generator = function::CodeGen {
         context: &context,
-        module: module,
-        builder: builder,
+        module,
+        builder,
     };
     println!("{}", code_ast_split_on_line[3]);
     println!(
