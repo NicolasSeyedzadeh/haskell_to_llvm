@@ -1,6 +1,7 @@
 use inkwell::context::Context;
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use inkwell::OptimizationLevel;
+use std::collections::HashMap;
 use std::fs;
 use tree_sitter::{Parser, Tree};
 mod function;
@@ -15,6 +16,7 @@ pub fn compile(source_path: &str) {
 
     let triple: &str = "";
     let ast = parse_to_ast(source_code);
+    let sym_table: HashMap<String, function::symbol_types::SymTableEntry> = HashMap::new();
 
     //haskell declarations always the root with no additional information
     let code_ast = ast.root_node().child(0).unwrap();
@@ -54,15 +56,15 @@ pub fn compile(source_path: &str) {
     /*for expression in code_ast_split_on_line.iter(){
         println!("{}", recursive_compile(&expression, source_code, &builder));
     }*/
-    let code_generator = function::CodeGen {
-        context: &context,
-        module,
-        builder,
-    };
-    println!("{}", code_ast_split_on_line[3]);
+    let mut code_generator = function::CodeGen::new(&context, module, builder);
+    println!("{}", code_ast_split_on_line[1]);
     println!(
         "{}",
-        recursive_compile(&code_ast_split_on_line[1], source_code, &code_generator)
+        recursive_compile(
+            &code_ast_split_on_line[1],
+            source_code.as_bytes(),
+            &mut code_generator
+        )
     );
 
     //return ownership
@@ -73,9 +75,11 @@ pub fn compile(source_path: &str) {
 
     module.print_to_file("out.ll").expect("ouch");
 }
+
 fn tree_to_children(code_ast: tree_sitter::Node) -> Vec<tree_sitter::Node> {
     return code_ast.children(&mut code_ast.walk()).collect();
 }
+
 fn parse_to_ast(source_code: &str) -> Tree {
     let mut parser = Parser::new();
     parser
@@ -85,28 +89,10 @@ fn parse_to_ast(source_code: &str) -> Tree {
     parser.parse(source_code, None).unwrap()
 }
 
-// we take a &str because we dont want to mess with the source code and return &str for a similar
-// reason but we need a lifetime specifier 'a to tell the compiler to delete the new str ref when
-// the code goes out of scope.
-fn get_val_from_node<'a>(ast: &tree_sitter::Node, code: &'a str) -> &'a str {
-    &code[ast.byte_range()]
-}
-
-/*struct ctx{
-
-}
-fn recursive_build_wrapper(
-    ast: tree_sitter::Node,
-    code: &str,
-    _builder: &inkwell::builder::Builder)
-    -> () {
-
-    }*/
-
 fn recursive_compile(
     ast: &tree_sitter::Node,
-    code: &str,
-    code_generator: &function::CodeGen,
+    code: &[u8],
+    code_generator: &mut function::CodeGen<'_>,
 ) -> String {
     //match top level with string
     //match on id rather than grammar name
@@ -117,21 +103,19 @@ fn recursive_compile(
                 &ast.child_by_field_name("name").unwrap(),
                 code,
                 code_generator,
-            ) + " of type: "
-                + get_val_from_node(&ast.child_by_field_name("type").unwrap(), code)
+            ) //; get_val_from_node(&ast.child_by_field_name("type").unwrap(), code)
         }
         "bind" => {
             recursive_compile(
                 &ast.child_by_field_name("name").unwrap(),
                 code,
                 code_generator,
-            ) + " bind to: "
-                + recursive_compile(
-                    &ast.child_by_field_name("match").unwrap(),
-                    code,
-                    code_generator,
-                )
-                .as_str()
+            );
+            recursive_compile(
+                &ast.child_by_field_name("match").unwrap(),
+                code,
+                code_generator,
+            )
         }
         "match" => recursive_compile(
             &ast.child_by_field_name("expression").unwrap(),
@@ -151,7 +135,18 @@ fn recursive_compile(
             ),
             code_generator,
         ),
-        "variable" => get_val_from_node(ast, code).to_string(),
+        "literal" => {
+            //select int or str
+            let lit = recursive_compile(&ast.child(0).unwrap(), code, code_generator);
+            code_generator.allocate_literal_string(lit)
+        }
+        "string" => {
+            let mut chars = ast.utf8_text(code).unwrap().chars();
+            chars.next();
+            chars.next_back();
+            chars.as_str().to_string()
+        }
+        "variable" => ast.utf8_text(code).unwrap().to_string(),
         _ => "Did not find a match".to_string(),
     }
 }
@@ -169,3 +164,7 @@ fn recursive_compile(
 //                       |apply|
 //                      /       \
 //                  function    argument
+
+//we need a symbol table that associates each variable with a global pointer to the code object, the
+//type and the ast with its code generated in it and we pass around the global pointers, this allows
+//us to return pointers to values of variable from vars and pointers to literals from literals.
