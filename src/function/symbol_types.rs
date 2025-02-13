@@ -47,6 +47,15 @@ impl<'a> ScopeArena<'a> {
                 .and_then(|parent_id| self.get_value_from_scope(&parent_id, key)),
         }
     }
+    pub fn rename_key_in_scope(&mut self, scope_id: &ScopeId, old_key: &str, new_key: String) {
+        let value = self
+            .scopes
+            .get_mut(scope_id)
+            .expect("trying to rename item in non-existant scope")
+            .remove_symbol(old_key)
+            .expect("renamed key out of scope");
+        self.add_symbol_to_scope(scope_id, new_key, value);
+    }
     pub fn remove_scope(&mut self, scope_id: &ScopeId) {
         self.scopes.remove(scope_id);
     }
@@ -69,6 +78,9 @@ impl<'a> Scope<'a> {
     }
     fn get_symbol(&self, string: &str) -> Option<&SymTableEntry<'a>> {
         self.symbol_table.get(string)
+    }
+    fn remove_symbol(&mut self, string: &str) -> Option<SymTableEntry<'a>> {
+        self.symbol_table.remove(string)
     }
 }
 #[derive(Clone)]

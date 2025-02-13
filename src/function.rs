@@ -215,7 +215,14 @@ impl<'ctx> CodeGen<'ctx> {
         //match on id rather than grammar name
         match ast.grammar_name() {
             "signature" => "".to_string(),
-            "bind" => self.recursive_compile(&ast.child_by_field_name("name").unwrap()),
+            "bind" => {
+                let bind_name = self.recursive_compile(&ast.child_by_field_name("name").unwrap());
+                let bind_value = self.recursive_compile(&ast.child_by_field_name("match").unwrap());
+
+                self.scopes
+                    .rename_key_in_scope(&self.scope, &bind_value, bind_name.clone());
+                bind_name
+            }
             "match" => self.recursive_compile(&ast.child_by_field_name("expression").unwrap()),
             "apply" => {
                 let func: String =
