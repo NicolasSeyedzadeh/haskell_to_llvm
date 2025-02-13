@@ -1,65 +1,109 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
 use super::CodeGen;
 
+pub type ScopeId = usize;
+pub struct ScopeArena<'a> {
+    scopes: HashMap<ScopeId, Scope<'a>>,
+    counter: ScopeId,
+}
+impl<'a> ScopeArena<'a> {
+    pub fn new() -> Self {
+        ScopeArena {
+            scopes: HashMap::new(),
+            counter: 0,
+        }
+    }
+
+    pub fn new_scope(&mut self, parent_scope: Option<ScopeId>) -> ScopeId {
+        self.counter += 1;
+        self.scopes.insert(self.counter, Scope::new(parent_scope));
+        self.counter
+    }
+    pub fn add_symbol_to_scope(
+        &mut self,
+        scope_id: &ScopeId,
+        key: String,
+        value: SymTableEntry<'a>,
+    ) {
+        self.scopes
+            .get_mut(&scope_id)
+            .expect("Trying to add to scope that is not in the Arena")
+            .add_symbol(key, value);
+    }
+    pub fn get_value_from_scope(
+        &self,
+        scope_id: &ScopeId,
+        key: &str,
+    ) -> Option<&SymTableEntry<'a>> {
+        let scope = self
+            .scopes
+            .get(scope_id)
+            .expect("Trying to recieve from scope that is not in the Arena");
+        match scope.get_symbol(key) {
+            Some(entry) => Some(entry),
+            None => scope
+                .parent_scope
+                .and_then(|parent_id| self.get_value_from_scope(&parent_id, key)),
+        }
+    }
+    pub fn remove_scope(&mut self, scope_id: &ScopeId) {
+        self.scopes.remove(scope_id);
+    }
+}
+
 #[derive(Clone)]
 pub struct Scope<'a> {
-    parent_scope: Option<usize>,
+    parent_scope: Option<ScopeId>,
     symbol_table: HashMap<String, SymTableEntry<'a>>,
 }
 impl<'a> Scope<'a> {
-    pub fn new(parent_scope: Option<usize>) -> Self {
+    fn new(parent_scope: Option<usize>) -> Self {
         Scope {
             parent_scope: parent_scope,
             symbol_table: HashMap::new(),
         }
     }
-    pub fn add_symbol(&mut self, string: String, entry: SymTableEntry<'a>) {
+    fn add_symbol(&mut self, string: String, entry: SymTableEntry<'a>) {
         self.symbol_table.insert(string, entry);
     }
-    pub fn get_symbol<'b>(
-        &'b self,
-        string: &str,
-        scopes: &'b Vec<Box<Scope<'a>>>,
-    ) -> Option<&'b SymTableEntry<'a>> {
-        match self.symbol_table.get(string) {
-            Some(entry) => Some(entry),
-            None => self
-                .parent_scope
-                .and_then(|x| scopes[x].get_symbol(string, scopes)),
-        }
+    fn get_symbol(&self, string: &str) -> Option<&SymTableEntry<'a>> {
+        self.symbol_table.get(string)
     }
 }
 #[derive(Clone)]
 pub struct Closure<'a> {
-    pub ast: Box<tree_sitter::Node<'a>>,
+    pub ast: Rc<tree_sitter::Node<'a>>,
     pub patterns: Vec<String>,
-    pub scope: Scope<'a>,
+    pub scope: ScopeId,
 }
 impl<'a> Closure<'a> {
-    pub fn new(ast: Box<tree_sitter::Node<'a>>, patterns: Vec<String>, scope: Scope<'a>) -> Self {
+    pub fn new(ast: Rc<tree_sitter::Node<'a>>, patterns: Vec<String>, scope: ScopeId) -> Self {
         Closure {
             ast,
             patterns,
             scope,
         }
     }
-    pub fn next_pattern(&'a self) -> &'a String {
-        self.patterns.get(0).unwrap()
+    pub fn next_pattern(&'a self) -> String {
+        self.patterns.get(0).unwrap().clone()
     }
 
     pub fn execute_ast(self, code_generator: &mut CodeGen<'a>) -> String {
         let mut last_result = None;
+        let old_scope = code_generator.scope;
+        code_generator.scope = self.scope;
         for expression in tree_to_children(*self.ast).iter() {
             println!("compiling: {}\n", expression);
             last_result = Some(code_generator.recursive_compile(expression));
         }
+        code_generator.scope = old_scope;
         last_result.unwrap()
     }
 }
 
 #[derive(Clone)]
-enum PrimPtrs<'a> {
+pub enum PrimPtrs<'a> {
     Basic(inkwell::values::BasicValueEnum<'a>),
     Global(inkwell::values::GlobalValue<'a>),
 }

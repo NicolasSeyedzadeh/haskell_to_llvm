@@ -10,9 +10,4 @@ impl Counter {
         self.count += 1;
         self.count
     }
-
-    /// Get the current value of the counter without incrementing
-    pub fn value(&self) -> usize {
-        self.count
-    }
 }
