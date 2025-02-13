@@ -4,14 +4,11 @@ use inkwell::OptimizationLevel;
 use std::fs;
 use tree_sitter::{Parser, Tree};
 mod function;
-mod types;
 
 pub fn compile(source_path: &str) {
     let source_code = &fs::read_to_string(source_path).unwrap();
     Target::initialize_native(&InitializationConfig::default())
         .expect("Failed to initialize native target");
-
-    types::get_types(source_path);
 
     let triple: &str = "";
     let ast = parse_to_ast(source_code);
