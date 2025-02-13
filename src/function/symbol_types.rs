@@ -27,7 +27,7 @@ impl<'a> ScopeArena<'a> {
         value: SymTableEntry<'a>,
     ) {
         self.scopes
-            .get_mut(&scope_id)
+            .get_mut(scope_id)
             .expect("Trying to add to scope that is not in the Arena")
             .add_symbol(key, value);
     }
@@ -69,7 +69,7 @@ pub struct Scope<'a> {
 impl<'a> Scope<'a> {
     fn new(parent_scope: Option<usize>) -> Self {
         Scope {
-            parent_scope: parent_scope,
+            parent_scope,
             symbol_table: HashMap::new(),
         }
     }
@@ -98,7 +98,7 @@ impl<'a> Closure<'a> {
         }
     }
     pub fn next_pattern(&'a self) -> String {
-        self.patterns.get(0).unwrap().clone()
+        self.patterns.first().unwrap().clone()
     }
 
     pub fn execute_ast(self, code_generator: &mut CodeGen<'a>) -> String {
@@ -138,24 +138,18 @@ impl<'a> SymTableEntry<'a> {
     }
     pub fn get_int(&self) -> Result<&inkwell::values::IntValue<'a>, String> {
         match self {
-            SymTableEntry::Prim(prim) => match prim {
-                PrimPtrs::Basic(basic_ptr) => match basic_ptr {
-                    inkwell::values::BasicValueEnum::IntValue(int_ptr) => Ok(int_ptr),
-                    _ => Err("Expected Int not other basic".to_string()),
-                },
-                _ => Err("Expected Int".to_string()),
+            SymTableEntry::Prim(PrimPtrs::Basic(basic_ptr)) => match basic_ptr {
+                inkwell::values::BasicValueEnum::IntValue(int_ptr) => Ok(int_ptr),
+                _ => Err("Expected Int not other basic".to_string()),
             },
             _ => Err("Expected Int".to_string()),
         }
     }
     pub fn get_ptr(&self) -> Result<&inkwell::values::PointerValue<'a>, String> {
         match self {
-            SymTableEntry::Prim(prim) => match prim {
-                PrimPtrs::Basic(basic_ptr) => match basic_ptr {
-                    inkwell::values::BasicValueEnum::PointerValue(ptr) => Ok(ptr),
-                    _ => Err("Expected pointer not other basic".to_string()),
-                },
-                _ => Err("Expected pointer".to_string()),
+            SymTableEntry::Prim(PrimPtrs::Basic(basic_ptr)) => match basic_ptr {
+                inkwell::values::BasicValueEnum::PointerValue(ptr) => Ok(ptr),
+                _ => Err("Expected pointer not other basic".to_string()),
             },
             _ => Err("Expected pointer".to_string()),
         }

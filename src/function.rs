@@ -85,7 +85,7 @@ impl<'ctx> CodeGen<'ctx> {
         );
         let returned_val;
         //no args left, execute ast with next arg added to scope
-        if closure_applied.patterns.len() == 0 {
+        if closure_applied.patterns.is_empty() {
             self.scopes
                 .add_symbol_to_scope(&new_scope, next_arg_var_name, arg_entry);
             returned_val = closure_applied.execute_ast(self);
@@ -241,12 +241,12 @@ impl<'ctx> CodeGen<'ctx> {
                 }
             }
             "string" => {
-                let mut chars = ast.utf8_text(&self.source_code).unwrap().chars();
+                let mut chars = ast.utf8_text(self.source_code).unwrap().chars();
                 chars.next();
                 chars.next_back();
                 chars.as_str().to_string()
             }
-            "variable" => ast.utf8_text(&self.source_code).unwrap().to_string(),
+            "variable" => ast.utf8_text(self.source_code).unwrap().to_string(),
             "function" => {
                 let function_name =
                     self.recursive_compile(&ast.child_by_field_name("name").unwrap());
