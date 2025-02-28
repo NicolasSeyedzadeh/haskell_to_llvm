@@ -1,10 +1,11 @@
-use std::rc::Rc;
-
 use inkwell::builder;
 use inkwell::context;
 use inkwell::module;
+use inkwell::values::BasicValueEnum;
+use std::rc::Rc;
 use symbol_types::ScopeArena;
 use symbol_types::ScopeId;
+use symbol_types::SymTableEntry;
 mod counter;
 pub mod symbol_types;
 
@@ -60,7 +61,6 @@ impl<'ctx> CodeGen<'ctx> {
         cg
     }
     fn defined_behaviour(&mut self, func_name: &str, arg: &str) -> String {
-        let new_scope = self.scopes.new_scope(Some(self.scope));
         //the function we want to apply
         let closure_to_apply = self
             .scopes
@@ -68,40 +68,48 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap()
             .get_closure()
             .unwrap();
+        let next_arg_var_name = closure_to_apply.next_pattern();
+
         //The value of the arg, We copy the symbol table entry into the new pattern
         let arg_entry = self
             .scopes
             .get_value_from_scope(&self.scope, arg)
             .unwrap()
             .clone();
-        let next_arg_var_name = closure_to_apply.next_pattern();
 
         //We need to make a new closure with the new scope that contains the arg
-
-        let closure_applied = symbol_types::Closure::new(
-            closure_to_apply.ast.clone(),
-            closure_to_apply.patterns.clone()[1..].to_vec(),
-            new_scope,
-        );
-        let returned_val;
+        let ast = closure_to_apply.ast.clone();
+        let new_patterns = closure_to_apply.patterns.clone()[1..].to_vec();
+        let new_scope = self.scopes.new_scope(Some(closure_to_apply.scope));
+        let closure_applied = symbol_types::Closure::new(ast, new_patterns, new_scope);
+        let returned_name: String;
         //no args left, execute ast with next arg added to scope
+
+        self.scopes
+            .add_symbol_to_scope(&new_scope, next_arg_var_name, arg_entry);
         if closure_applied.patterns.is_empty() {
+            returned_name = closure_applied.execute_ast(self);
+            let returned_val = self
+                .scopes
+                .get_value_from_scope(&new_scope, &returned_name)
+                .unwrap()
+                .clone();
             self.scopes
-                .add_symbol_to_scope(&new_scope, next_arg_var_name, arg_entry);
-            returned_val = closure_applied.execute_ast(self);
+                .add_symbol_to_scope(&self.scope, returned_name.clone(), returned_val);
+
             self.scopes.remove_scope(&new_scope);
         }
-        // if more than one arg left, save to the scope
+        // if more than one arg left, add the arg to the subs co
         else {
-            returned_val = "".to_string();
             let next = self.sym_counter.increment();
+            returned_name = format!("{}{}", "closurelit", next);
             self.scopes.add_symbol_to_scope(
-                &new_scope,
-                format!("{}{}", "closurelit", next),
+                &self.scope,
+                returned_name.clone(),
                 symbol_types::SymTableEntry::closure_to_entry(closure_applied),
             );
         }
-        returned_val
+        returned_name
     }
     fn putstrln_behaviour(&self, arg: &str) {
         // get printf linked from c
@@ -111,52 +119,55 @@ impl<'ctx> CodeGen<'ctx> {
             .fn_type(&[self.context.i8_type().ptr_type(0.into()).into()], true);
         let printf = self.module.add_function("printf", printf_type, None);
 
-        // Get the string pointer from the symbol table
-        let string_value = self
-            .scopes
-            .get_value_from_scope(&self.scope, arg)
-            .unwrap()
-            .get_str()
-            .expect("passed non-string variable name into printstrLn")
-            .as_pointer_value();
-
-        let zero = *self
-            .scopes
-            .get_value_from_scope(&self.scope, "zero")
-            .unwrap()
-            .get_int()
-            .unwrap();
-        // Use `build_gep` to get pointer to string rather than char array
-        let string_ptr = unsafe {
-            self.builder
-                .build_gep(string_value, &[zero, zero], "string_ptr")
+        // Get the arg pointer from the symbol table
+        let val_to_print = self.scopes.get_value_from_scope(&self.scope, arg).unwrap();
+        let prim_pointer = match val_to_print {
+            SymTableEntry::Prim(prim) => Ok(prim),
+            SymTableEntry::Clos(_) => Err("cannot print closure"),
         }
         .unwrap();
+        //A little convoluted but we basically make a format string and BasicMetadataValueEnum out
+        //of the type in the entry
+        let (format_string, str_to_print) = match prim_pointer {
+            symbol_types::PrimPtrs::Global(string_value) => {
+                let zero = *self
+                    .scopes
+                    .get_value_from_scope(&self.scope, "zero")
+                    .unwrap()
+                    .get_int()
+                    .unwrap();
+                // Use `build_gep` to get pointer to string rather than char array
+                let string_ptr = unsafe {
+                    self.builder.build_gep(
+                        string_value.as_pointer_value(),
+                        &[zero, zero],
+                        "string_ptr",
+                    )
+                }
+                .unwrap();
+                Ok((
+                    "%s\n",
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(string_ptr),
+                ))
+            }
+            symbol_types::PrimPtrs::Basic(basic) => match basic {
+                BasicValueEnum::IntValue(int) => Ok((
+                    "%d\n",
+                    inkwell::values::BasicMetadataValueEnum::IntValue(*int),
+                )),
+                _ => Err("Print not supported for other basic values"),
+            },
+        }
+        .unwrap();
+        let global_str = self
+            .builder
+            .build_global_string_ptr(&format_string, "fmt")
+            .unwrap()
+            .as_pointer_value();
 
         // Build the call to printf(string)
         self.builder
-            .build_call(
-                printf,
-                &[inkwell::values::BasicMetadataValueEnum::PointerValue(
-                    string_ptr,
-                )],
-                "call_printf",
-            )
-            .expect("Build call failed on print");
-        // Build the call to printf("\n")
-        self.builder
-            .build_call(
-                printf,
-                &[inkwell::values::BasicMetadataValueEnum::PointerValue(
-                    *self
-                        .scopes
-                        .get_value_from_scope(&self.scope, "newline_ptr")
-                        .unwrap()
-                        .get_ptr()
-                        .unwrap(),
-                )],
-                "call_printf",
-            )
+            .build_call(printf, &[global_str.into(), str_to_print], "call_printf")
             .expect("Build call failed on print");
     }
     fn allocate_literal_string_wrapped(&mut self, lit_name: String, to_allocate: String) -> String {
@@ -184,7 +195,6 @@ impl<'ctx> CodeGen<'ctx> {
         );
         lit_name
     }
-
     pub fn apply_fn(&mut self, func_string: String, arg: String) -> String {
         match function_behaviour::FunctionBehaviour::string_to_func(func_string.as_str()) {
             function_behaviour::FunctionBehaviour::PutStrLn => {
@@ -196,7 +206,40 @@ impl<'ctx> CodeGen<'ctx> {
             }
         }
     }
+    fn plus(&mut self, left: String, right: String) -> String {
+        //must be int if type checked
+        let lhs = *self
+            .scopes
+            .get_value_from_scope(&self.scope, &left)
+            .unwrap()
+            .get_int()
+            .unwrap();
 
+        let rhs = *self
+            .scopes
+            .get_value_from_scope(&self.scope, &right)
+            .unwrap()
+            .get_int()
+            .unwrap();
+
+        let next = self.sym_counter.increment();
+        let name = format!("add_result{}", next);
+
+        let intval = self.builder.build_int_add(lhs, rhs, &name).unwrap();
+
+        self.scopes.add_symbol_to_scope(
+            &self.scope,
+            name.clone(),
+            symbol_types::SymTableEntry::int_to_entry(intval),
+        );
+        name
+    }
+    fn infix_behaviour(&mut self, op: &str, left: String, right: String) -> String {
+        match op {
+            "+" => self.plus(left, right),
+            _ => panic!("operand not known"),
+        }
+    }
     pub fn construct_fn(
         &mut self,
         func_name: String,
@@ -218,7 +261,6 @@ impl<'ctx> CodeGen<'ctx> {
             "bind" => {
                 let bind_name = self.recursive_compile(&ast.child_by_field_name("name").unwrap());
                 let bind_value = self.recursive_compile(&ast.child_by_field_name("match").unwrap());
-
                 self.scopes
                     .rename_key_in_scope(&self.scope, &bind_value, bind_name.clone());
                 bind_name
@@ -246,24 +288,53 @@ impl<'ctx> CodeGen<'ctx> {
                 chars.next_back();
                 chars.as_str().to_string()
             }
-            "variable" => ast.utf8_text(self.source_code).unwrap().to_string(),
+            "integer" | "variable" | "operator" => {
+                ast.utf8_text(self.source_code).unwrap().to_string()
+            }
             "function" => {
+                //parse function name
                 let function_name =
                     self.recursive_compile(&ast.child_by_field_name("name").unwrap());
+                //get the args
                 let patterns =
                     symbol_types::tree_to_children(ast.child_by_field_name("patterns").unwrap())
                         .iter()
                         .map(|x| self.recursive_compile(x))
                         .collect();
+
+                //construct the function adding the closure to the scope
                 self.construct_fn(
                     function_name,
-                    Rc::new(ast.child_by_field_name("match").unwrap()),
+                    Rc::new(
+                        ast.child_by_field_name("match")
+                            .unwrap()
+                            .child_by_field_name("expression")
+                            .unwrap(),
+                    ),
                     patterns,
                 );
 
-                todo!()
+                //return nothing as we have completed the bind
+                "".to_string()
             }
-            _ => "Did not find a match".to_string(),
+            "parens" => self.recursive_compile(&ast.child_by_field_name("expression").unwrap()),
+            "infix" => {
+                let operator =
+                    self.recursive_compile(&ast.child_by_field_name("operator").unwrap());
+
+                let left =
+                    self.recursive_compile(&ast.child_by_field_name("left_operand").unwrap());
+                let right =
+                    self.recursive_compile(&ast.child_by_field_name("right_operand").unwrap());
+
+                self.infix_behaviour(&operator, left, right)
+            }
+            _ => panic!("Unimplemented grammar node: {}", ast.grammar_name()),
         }
     }
 }
+
+/*        println!("Printing hashmaps: ");
+for k in self.scopes.scopes.get(&parent).unwrap().symbol_table.keys() {
+    println!("{}", k);
+}  */

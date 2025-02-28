@@ -1,3 +1,4 @@
+use inkwell::attributes::Attribute;
 use inkwell::context::Context;
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use inkwell::OptimizationLevel;
@@ -31,7 +32,7 @@ pub fn compile(source_path: &str) {
             &target_triple,
             "generic",
             "",
-            OptimizationLevel::Default,
+            OptimizationLevel::None,
             inkwell::targets::RelocMode::Default,
             inkwell::targets::CodeModel::Default,
         )
@@ -56,8 +57,11 @@ pub fn compile(source_path: &str) {
     }
 
     let _ = code_generator.builder.build_return(Some(&return_value));
-
-    code_generator.module.print_to_file("out.ll").expect("ouch");
+    //code_generator.module.print_to_stderr();
+    code_generator
+        .module
+        .print_to_file("out.ll")
+        .expect("Problem with printing to file");
 }
 
 fn parse_to_ast(source_code: &str) -> Tree {

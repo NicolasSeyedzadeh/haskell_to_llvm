@@ -8,5 +8,3 @@ run:
 clean:
 	rm out.ll
 	rm out.s
-	rm src/test.hi
-	rm src/test.o

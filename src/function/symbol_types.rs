@@ -1,10 +1,8 @@
-use std::{collections::HashMap, rc::Rc};
-
 use super::CodeGen;
-
+use std::{collections::HashMap, rc::Rc};
 pub type ScopeId = usize;
 pub struct ScopeArena<'a> {
-    scopes: HashMap<ScopeId, Scope<'a>>,
+    pub scopes: HashMap<ScopeId, Scope<'a>>, //REMEMBER TO MAKE NOT PUB
     counter: ScopeId,
 }
 impl<'a> ScopeArena<'a> {
@@ -63,8 +61,8 @@ impl<'a> ScopeArena<'a> {
 
 #[derive(Clone)]
 pub struct Scope<'a> {
-    parent_scope: Option<ScopeId>,
-    symbol_table: HashMap<String, SymTableEntry<'a>>,
+    pub parent_scope: Option<ScopeId>,
+    pub symbol_table: HashMap<String, SymTableEntry<'a>>, //make not pub
 }
 impl<'a> Scope<'a> {
     fn new(parent_scope: Option<usize>) -> Self {
@@ -102,13 +100,9 @@ impl<'a> Closure<'a> {
     }
 
     pub fn execute_ast(self, code_generator: &mut CodeGen<'a>) -> String {
-        let mut last_result = None;
         let old_scope = code_generator.scope;
         code_generator.scope = self.scope;
-        for expression in tree_to_children(*self.ast).iter() {
-            println!("compiling: {}\n", expression);
-            last_result = Some(code_generator.recursive_compile(expression));
-        }
+        let last_result = Some(code_generator.recursive_compile(&self.ast));
         code_generator.scope = old_scope;
         last_result.unwrap()
     }
