@@ -1,13 +1,14 @@
-use inkwell::attributes::Attribute;
 use inkwell::context::Context;
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple};
 use inkwell::OptimizationLevel;
 use std::fs;
 use tree_sitter::{Parser, Tree};
 mod function;
+mod types;
 
 pub fn compile(source_path: &str) {
     let source_code = &fs::read_to_string(source_path).unwrap();
+    //types::get_types(source_path);
     Target::initialize_native(&InitializationConfig::default())
         .expect("Failed to initialize native target");
 

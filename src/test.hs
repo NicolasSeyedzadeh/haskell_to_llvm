@@ -1,14 +1,21 @@
 add a b = a + b
 plus3 = add 3
-
-main :: IO ()
 main = print (plus3 5)
 
+data MaybeNew x = None | Some x
 
-return :: a -> Maybe a
-return x  = Just x
+instance Functor MaybeNew where
+    fmap f None = None
+    fmap f (Some x) = Some (f x)
 
-(>>=) :: Maybe a -> (a -> Maybe b) -> Maybe b
-(>>=) m g = case m of
-                Nothing -> Nothing
-                Just x  -> g x
+instance Applicative MaybeNew where
+  pure = Some
+  None <*> _ = None
+  _ <*> None = None
+  Some f <*> Some x = Some (f x)
+
+instance Monad MaybeNew where
+    None >>= _ = None
+    Some x >>= f = f x
+
+x=None
