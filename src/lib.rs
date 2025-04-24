@@ -3,8 +3,8 @@ use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple
 use inkwell::OptimizationLevel;
 use std::fs;
 use tree_sitter::{Parser, Tree};
-mod function;
-mod types;
+mod code_gen_def;
+//mod types;
 
 pub fn compile(source_path: &str) {
     let source_code = &fs::read_to_string(source_path).unwrap();
@@ -17,7 +17,7 @@ pub fn compile(source_path: &str) {
     //haskell declarations always the root with no additional information
     let code_ast = ast.root_node().child(0).unwrap();
     let code_ast_split_on_line: Vec<tree_sitter::Node> =
-        function::symbol_types::tree_to_children(code_ast);
+        code_gen_def::symbol_types::tree_to_children(code_ast);
 
     let context = Context::create();
     let module = context.create_module("my_module");
@@ -44,14 +44,21 @@ pub fn compile(source_path: &str) {
     let fn_type = i32_type.fn_type(&[], false);
     let function = module.add_function("main", fn_type, None);
 
-    let basic_block = context.append_basic_block(function, "entry");
+    let basic_block: inkwell::basic_block::BasicBlock<'_> =
+        context.append_basic_block(function, "entry");
     let return_value = i32_type.const_int(0, false);
 
     let builder = context.create_builder();
     builder.position_at_end(basic_block);
 
-    let code_generator =
-        &mut function::CodeGen::new(&context, module, builder, source_code.as_bytes());
+    let code_generator = &mut code_gen_def::CodeGen::new(
+        &context,
+        module,
+        builder,
+        function,
+        basic_block,
+        source_code.as_bytes(),
+    );
     for expression in code_ast_split_on_line.iter() {
         println!("compiling: {}\n", expression);
         println!("{}", code_generator.recursive_compile(expression,));

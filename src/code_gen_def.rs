@@ -1,35 +1,42 @@
 use inkwell::builder;
 use inkwell::context;
 use inkwell::module;
-use symbol_types::ScopeArena;
-use symbol_types::ScopeId;
 mod counter;
 pub mod symbol_types;
 
+mod class;
+mod data_constructors;
 mod function_behaviour;
 mod recurse;
+mod scoping;
 
 pub struct CodeGen<'ctx> {
     context: &'ctx context::Context,
     pub module: module::Module<'ctx>,
     pub builder: builder::Builder<'ctx>,
+    pub function: inkwell::values::FunctionValue<'ctx>,
+    pub basic_block: inkwell::basic_block::BasicBlock<'ctx>,
     source_code: &'ctx [u8],
-    scope: ScopeId,
+    scope: scoping::ScopeId,
     sym_counter: Box<counter::Counter>,
-    scopes: ScopeArena<'ctx>,
+    scopes: scoping::ScopeArena<'ctx>,
 }
 impl<'ctx> CodeGen<'ctx> {
     pub fn new(
         context: &'ctx context::Context,
         module: module::Module<'ctx>,
         builder: builder::Builder<'ctx>,
+        function: inkwell::values::FunctionValue<'ctx>,
+        basic_block: inkwell::basic_block::BasicBlock<'ctx>,
         source_code: &'ctx [u8],
     ) -> Self {
-        let mut scopes = ScopeArena::new();
+        let mut scopes = scoping::ScopeArena::new();
         let mut cg = CodeGen {
             context,
             module,
             builder,
+            function,
+            basic_block,
             source_code,
             scope: scopes.new_scope(None),
             sym_counter: Box::new(counter::Counter::new()),
