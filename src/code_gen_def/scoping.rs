@@ -1,9 +1,8 @@
-use std::{collections::HashMap, os::unix::process::parent_id};
+use std::collections::HashMap;
 
 use super::{
     data_constructors,
     symbol_types::{self, SymTableEntry},
-    CodeGen,
 };
 pub type ScopeId = usize;
 pub struct ScopeArena<'a> {

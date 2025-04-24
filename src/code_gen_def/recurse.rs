@@ -4,7 +4,6 @@ use crate::code_gen_def::data_constructors::Constructor;
 use crate::code_gen_def::data_constructors::ADT;
 use crate::code_gen_def::symbol_types;
 use crate::code_gen_def::CodeGen;
-use std::collections::HashSet;
 use std::iter::zip;
 use std::rc::Rc;
 

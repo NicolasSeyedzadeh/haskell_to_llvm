@@ -1,5 +1,3 @@
-use inkwell::values::IntValue;
-
 use super::class;
 use super::class::GeneralisedClosure;
 use super::data_constructors::Constructor;
@@ -10,7 +8,6 @@ use super::CodeGen;
 use std::iter::zip;
 use std::mem;
 use std::rc::Rc;
-use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub enum ClosureUnion<'a> {
@@ -218,9 +215,6 @@ impl<'a> Closure<'a> {
                 //if we are trying to compile from a returned closure
                 ClosureUnion::Closure(clos) => {
                     //for each jump point execute it
-                    println!("ahsjdgakjbdkja");
-
-                    println!("{:?}", clos);
 
                     for (subclosure, new_block) in zip(&jump_point.possible_asts, &basic_block_list)
                     {
@@ -371,16 +365,17 @@ impl<'a> Closure<'a> {
                         SymTableEntry::Prim(PrimPtrs::Basic(phi.as_basic_value())),
                     );
                     let mut new_jump_points = JumpPoint::new(SwitchType::Int);
-                    for branch_index in 0..result_names_and_blocks.len() - 1 {
+                    for (branch_index, (result, _)) in result_names_and_blocks
+                        .iter()
+                        .enumerate()
+                        .take(result_names_and_blocks.len() - 1)
+                    {
                         new_jump_points.add_point(
                             branch_index as u64,
                             ClosureUnion::Closure(
                                 code_generator
                                     .scopes
-                                    .get_value_from_scope(
-                                        &code_generator.scope,
-                                        &result_names_and_blocks[branch_index].0,
-                                    )
+                                    .get_value_from_scope(&code_generator.scope, &result)
                                     .unwrap()
                                     .clone()
                                     .get_closure_move()
@@ -388,7 +383,7 @@ impl<'a> Closure<'a> {
                             ),
                         );
                     }
-                    let mut new_default = code_generator
+                    let new_default = code_generator
                         .scopes
                         .get_value_from_scope(
                             &code_generator.scope,
@@ -471,7 +466,7 @@ impl<'a> SymTableEntry<'a> {
         match self {
             SymTableEntry::Prim(prim) => match prim {
                 PrimPtrs::Global(global_ptr) => Ok(global_ptr),
-                _ => Err("Expected String".to_string()),
+                _ => Err("Expected String not other basic".to_string()),
             },
             _ => Err("Expected String".to_string()),
         }

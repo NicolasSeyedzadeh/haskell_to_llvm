@@ -3,8 +3,6 @@ use crate::code_gen_def::CodeGen;
 use inkwell::values::BasicValueEnum;
 use std::rc::Rc;
 
-use super::symbol_types::ClosureUnion;
-
 pub enum FunctionBehaviour {
     PutStrLn,
     Defined,
@@ -77,7 +75,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
     fn defined_behaviour(&mut self, func_name: &str, arg: Rc<tree_sitter::Node<'ctx>>) -> String {
         //the function we want to apply
-        let mut closure_to_apply = self
+        let closure_to_apply = self
             .scopes
             .recieve_owned_entry(&self.scope, func_name)
             .unwrap()

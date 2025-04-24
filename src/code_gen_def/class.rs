@@ -1,6 +1,5 @@
-use super::{data_constructors::ADT, scoping};
+use super::scoping;
 use std::collections::HashMap;
-use tree_sitter::Node;
 
 //generalised in that once we recieve a type we need to know which instance to use, but this info is
 //not necessarily known before all arguments are provided
