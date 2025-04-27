@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{
-    data_constructors,
+    data_constructors::{self, Constructor},
     symbol_types::{self, SymTableEntry},
 };
 pub type ScopeId = usize;
@@ -95,12 +95,54 @@ impl<'a> ScopeArena<'a> {
             }
         }
     }
+    pub fn debug_print_in_constructor_scope(&self, scope_id: &ScopeId) {
+        let scope = self
+            .scopes
+            .get(scope_id)
+            .expect("Trying to debug print from scope that is not in the Arena");
+
+        match scope.parent_scope {
+            None => print!("{:?}\n\n\n", scope.constructor_symbol_table),
+            Some(parent) => {
+                print!("{:?}\n\n\n", scope.symbol_table);
+                self.debug_print_in_constructor_scope(&parent);
+            }
+        }
+    }
+    pub fn register_constructor(
+        &mut self,
+        scope_id: &ScopeId,
+        constructor_name: String,
+        constructor: Constructor,
+    ) {
+        self.scopes
+            .get_mut(scope_id)
+            .expect("Trying to add to scope that is not in the Arena")
+            .register_constructor(constructor_name, constructor);
+    }
+
+    pub fn get_constructor(
+        &self,
+        scope_id: &ScopeId,
+        constructor_name: &str,
+    ) -> Option<&Constructor> {
+        let scope = self
+            .scopes
+            .get(scope_id)
+            .expect("Trying to recieve from scope that is not in the Arena");
+        match scope.get_constructor(constructor_name) {
+            Some(entry) => Some(entry),
+            None => scope
+                .parent_scope
+                .and_then(|parent_id| self.get_constructor(&parent_id, constructor_name)),
+        }
+    }
 }
 
 pub struct Scope<'a> {
     parent_scope: Option<ScopeId>,
     symbol_table: HashMap<String, symbol_types::SymTableEntry<'a>>,
-    constructor_symbol_table: HashMap<String, (usize, data_constructors::Constructor)>, //constructor name-> Constructor struct instance
+    constructor_symbol_table: HashMap<String, data_constructors::Constructor>, //constructor name-> Constructor struct instance
 }
 impl<'a> Scope<'a> {
     fn new(parent_scope: Option<usize>) -> Self {
@@ -118,5 +160,12 @@ impl<'a> Scope<'a> {
     }
     fn remove_symbol(&mut self, string: &str) -> Option<symbol_types::SymTableEntry<'a>> {
         self.symbol_table.remove(string)
+    }
+    fn register_constructor(&mut self, constructor_name: String, constructor: Constructor) {
+        self.constructor_symbol_table
+            .insert(constructor_name, constructor);
+    }
+    fn get_constructor(&self, string: &str) -> Option<&Constructor> {
+        self.constructor_symbol_table.get(string)
     }
 }

@@ -1,11 +1,13 @@
 use crate::code_gen_def::class::GeneralisedClosure;
 use crate::code_gen_def::data_constructors;
-use crate::code_gen_def::data_constructors::Constructor;
 use crate::code_gen_def::data_constructors::ADT;
+use crate::code_gen_def::scoping;
 use crate::code_gen_def::symbol_types;
 use crate::code_gen_def::CodeGen;
 use std::iter::zip;
 use std::rc::Rc;
+
+use super::symbol_types::PrimPtrs;
 
 impl<'ctx> CodeGen<'ctx> {
     pub fn recursive_compile(&mut self, ast: &tree_sitter::Node<'ctx>) -> String {
@@ -22,10 +24,93 @@ impl<'ctx> CodeGen<'ctx> {
             }
             "match" => self.recursive_compile(&ast.child_by_field_name("expression").unwrap()),
             "apply" => {
-                let func: String =
-                    self.recursive_compile(&ast.child_by_field_name("function").unwrap());
-                let arg = Rc::new(ast.child_by_field_name("argument").unwrap());
-                self.apply_fn(func, arg)
+                let rec = &ast.child_by_field_name("function").unwrap();
+                match rec.kind() {
+                    "variable" => {
+                        let func = self.recursive_compile(rec);
+                        let arg = Rc::new(ast.child_by_field_name("argument").unwrap());
+                        self.apply_fn(func, arg)
+                    }
+                    "constructor" => {
+                        let i32_type = self.context.i32_type();
+                        let i8_ptr_type: inkwell::types::PointerType<'_> =
+                            self.context.i8_type().ptr_type(0.into()); //void pointer
+                        let constructor_key = rec.utf8_text(self.source_code).unwrap();
+                        let arg =
+                            self.recursive_compile(&ast.child_by_field_name("argument").unwrap());
+                        let constructor = self
+                            .scopes
+                            .get_constructor(&self.scope, &constructor_key)
+                            .unwrap();
+                        let tag = constructor.get_tag();
+                        let adt = self
+                            .scopes
+                            .get_value_from_scope(&self.scope, &constructor.type_loc)
+                            .unwrap()
+                            .get_adt()
+                            .unwrap();
+                        let tag_value: inkwell::values::IntValue<'_> =
+                            i32_type.const_int(tag, false);
+
+                        let payload_ptr;
+
+                        let undef = adt.type_llvm.get_undef();
+                        //if the argument is an int store it with a pointer
+                        match self.scopes.get_value_from_scope(&self.scope, &arg).unwrap() {
+                            symbol_types::SymTableEntry::Prim(PrimPtrs::Basic(_)) => {
+                                let arg_payload = *self.get_int(arg).unwrap();
+                                let alloca =
+                                    self.builder.build_alloca(i32_type, "lit_payload").unwrap();
+                                let _ = self.builder.build_store(alloca, arg_payload);
+                                payload_ptr = self
+                                    .builder
+                                    .build_bit_cast(alloca, i8_ptr_type, "payload_cast")
+                                    .unwrap();
+                            }
+                            symbol_types::SymTableEntry::Prim(PrimPtrs::Constructor(_)) => {
+                                let arg_payload = self
+                                    .get_constructor_literal(arg, constructor.type_loc.clone())
+                                    .unwrap()
+                                    .struct_value;
+                                let alloca =
+                                    self.builder.build_alloca(i32_type, "lit_payload").unwrap();
+                                let _ = self.builder.build_store(alloca, arg_payload);
+                                payload_ptr = self
+                                    .builder
+                                    .build_bit_cast(alloca, i8_ptr_type, "payload_cast")
+                                    .unwrap();
+                            }
+                            _ => panic!("Only ADT and Int supported as ADT field"),
+                        };
+
+                        let with_tag = self
+                            .builder
+                            .build_insert_value(undef, tag_value, 0, "insert_tag")
+                            .unwrap()
+                            .into_struct_value();
+                        let const_struct = self
+                            .builder
+                            .build_insert_value(with_tag, payload_ptr, 1, "insert_payload")
+                            .unwrap()
+                            .into_struct_value();
+
+                        let constructor_name =
+                            format!("ADT literal {}", self.sym_counter.increment());
+                        self.scopes.add_symbol_to_scope(
+                            &self.scope,
+                            constructor_name.clone(),
+                            symbol_types::SymTableEntry::adt_constructor_to_entry(
+                                data_constructors::ConstructorLiteral::new(
+                                    const_struct,
+                                    constructor_key.to_string(),
+                                ),
+                            ),
+                        );
+
+                        constructor_name
+                    }
+                    _ => panic!("trying to apply something not supported"),
+                }
             }
             "literal" => {
                 //select int or str
@@ -63,7 +148,12 @@ impl<'ctx> CodeGen<'ctx> {
                 self.infix_behaviour(&operator, left, right)
             }
             "data_type" => {
-                let id = self.recursive_compile(&ast.child_by_field_name("name").unwrap());
+                let id = ast
+                    .child_by_field_name("name")
+                    .unwrap()
+                    .utf8_text(self.source_code)
+                    .unwrap()
+                    .to_string();
                 let patterns: Vec<String> =
                     symbol_types::tree_to_children(ast.child_by_field_name("patterns").unwrap())
                         .iter()
@@ -71,46 +161,38 @@ impl<'ctx> CodeGen<'ctx> {
                         .collect();
 
                 let i32_type = self.context.i32_type();
-
                 //placeholder type for possible data payloads
-                let new_ptr_type = self.context.struct_type(&[], false).ptr_type(0.into());
+                let new_ptr_type = self.context.i8_type().ptr_type(0.into());
 
                 // make new type, tag to decide which constructor it is
                 let new_type = self
                     .context
                     .struct_type(&[i32_type.into(), new_ptr_type.into()], false);
-                let new_adt = ADT::new(id.clone(), patterns, new_type);
 
+                let mut constr_name_list = vec![];
+                for (union_number, x) in
+                    symbol_types::tree_to_children(ast.child_by_field_name("constructors").unwrap())
+                        .iter()
+                        .filter(|x| x.grammar_name() != "|")
+                        .enumerate()
+                {
+                    let (name, cons) = data_constructors::Constructor::parse_from_ast(
+                        x,
+                        self,
+                        id.clone(),
+                        union_number,
+                    );
+                    self.scopes
+                        .register_constructor(&self.scope, name.clone(), cons);
+                    constr_name_list.push(name);
+                }
+
+                let new_adt = ADT::new(id.clone(), patterns, new_type, constr_name_list);
                 self.scopes.add_symbol_to_scope(
                     &self.scope,
                     id.clone(),
                     symbol_types::SymTableEntry::adt_def_to_entry(new_adt),
                 );
-
-                let constructors: Vec<Constructor> = symbol_types::tree_to_children(
-                    ast.child_by_field_name("constructors").unwrap(),
-                )
-                .iter()
-                .enumerate()
-                .filter(|(_, x)| x.grammar_name() != "|")
-                .map(|(union_number, x)| {
-                    data_constructors::Constructor::parse_from_ast(
-                        x,
-                        self,
-                        id.clone(),
-                        union_number,
-                    )
-                })
-                .collect();
-
-                constructors.into_iter().for_each(|x| {
-                    self.scopes.add_symbol_to_scope(
-                        &self.scope,
-                        format!("{}+{}", id, x.name),
-                        symbol_types::SymTableEntry::adt_constructor_to_entry(x),
-                    )
-                });
-
                 id
             }
             "class" => {
@@ -156,8 +238,63 @@ impl<'ctx> CodeGen<'ctx> {
                 }
                 id
             }
+            "name" => {
+                if ast.kind() == "constructor" {
+                    let i32_type = self.context.i32_type();
+                    let i8_ptr_type: inkwell::types::PointerType<'_> =
+                        self.context.i8_type().ptr_type(0.into());
 
-            "integer" | "variable" | "operator" | "name" => {
+                    let constructor_key = ast.utf8_text(self.source_code).unwrap();
+                    let constructor = self
+                        .scopes
+                        .get_constructor(&self.scope, &constructor_key)
+                        .unwrap();
+                    let tag = constructor.get_tag();
+                    let adt = self
+                        .scopes
+                        .get_value_from_scope(&self.scope, &constructor.type_loc)
+                        .unwrap()
+                        .get_adt()
+                        .unwrap();
+
+                    let tag_value: inkwell::values::IntValue<'_> = i32_type.const_int(tag, false);
+                    let alloca = self.builder.build_alloca(i32_type, "lit_payload").unwrap();
+                    let payload_ptr = self
+                        .builder
+                        .build_bit_cast(alloca, i8_ptr_type, "payload_cast")
+                        .unwrap();
+
+                    let undef = adt.type_llvm.get_undef();
+                    let with_tag = self
+                        .builder
+                        .build_insert_value(undef, tag_value, 0, "insert_tag")
+                        .unwrap()
+                        .into_struct_value();
+                    let const_struct = self
+                        .builder
+                        .build_insert_value(with_tag, payload_ptr, 1, "insert_payload")
+                        .unwrap()
+                        .into_struct_value();
+
+                    let constructor_name = format!("ADT literal {}", self.sym_counter.increment());
+                    self.scopes.add_symbol_to_scope(
+                        &self.scope,
+                        constructor_name.clone(),
+                        symbol_types::SymTableEntry::adt_constructor_to_entry(
+                            data_constructors::ConstructorLiteral::new(
+                                const_struct,
+                                constructor_key.to_string(),
+                            ),
+                        ),
+                    );
+
+                    constructor_name
+                } else {
+                    ast.utf8_text(self.source_code).unwrap().to_string()
+                }
+            }
+
+            "integer" | "variable" | "operator" => {
                 ast.utf8_text(self.source_code).unwrap().to_string()
             }
             "instance" => {

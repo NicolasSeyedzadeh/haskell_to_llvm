@@ -3,6 +3,9 @@ use crate::code_gen_def::CodeGen;
 use inkwell::values::BasicValueEnum;
 use std::rc::Rc;
 
+use super::data_constructors;
+use super::symbol_types::SymTableEntry;
+
 pub enum FunctionBehaviour {
     PutStrLn,
     Defined,
@@ -41,19 +44,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.get_and_evaluate_from_scope(&left);
         self.get_and_evaluate_from_scope(&right);
 
-        let lhs = *self
-            .scopes
-            .get_value_from_scope(&self.scope, &left)
-            .unwrap()
-            .get_int()
-            .unwrap();
+        let lhs = *self.get_int(left).unwrap();
 
-        let rhs = *self
-            .scopes
-            .get_value_from_scope(&self.scope, &right)
-            .unwrap()
-            .get_int()
-            .unwrap();
+        let rhs = *self.get_int(right).unwrap();
 
         let next = self.sym_counter.increment();
         let name = format!("add_result{}", next);
@@ -85,20 +78,19 @@ impl<'ctx> CodeGen<'ctx> {
         let patterns_left = closure_to_apply.patterns_left();
         let first_pattern = closure_to_apply.next_pattern();
         let returned_name;
-        println!("{}", arg);
         let arg_entry = symbol_types::SymTableEntry::Ast(arg.clone());
         let new_scope = self.scopes.new_scope(Some(closure_to_apply.scope));
-        self.scopes.add_symbol_to_scope(
-            &new_scope,
-            first_pattern
-                .utf8_text(self.source_code)
-                .unwrap()
-                .to_string(),
-            arg_entry,
-        );
 
         //if we dont have a complete application, make a new closure with the new scope and patterns
         if patterns_left > 1 {
+            self.scopes.add_symbol_to_scope(
+                &new_scope,
+                first_pattern
+                    .utf8_text(self.source_code)
+                    .unwrap()
+                    .to_string(),
+                arg_entry,
+            );
             //make new closure and add it to old scope
             let new_closure = closure_to_apply.clone_with_new_patterns(new_scope);
             let next = self.sym_counter.increment();
@@ -111,25 +103,22 @@ impl<'ctx> CodeGen<'ctx> {
         }
         //if we have a complete application, determine whether we need the switch and execute the ast
         else {
+            let arg_to_switch_on = Some(self.recursive_compile(&arg));
             //if theres a jump point, execute the arg and use it as a switch key
-            match closure_to_apply.jump_points {
-                Some(ref jump_point) => match jump_point.switch_type {
-                    symbol_types::SwitchType::Int => {
-                        let arg_to_switch_on = Some(self.recursive_compile(&arg));
-                        returned_name = closure_to_apply
-                            .execute_ast(self, new_scope, arg_to_switch_on)
-                            .0;
-                    }
-                    symbol_types::SwitchType::Constructor => {
-                        panic!("matching not implemented for constructors yet")
-                    }
-                },
-                //last arg and no jump points, we just execute
-                None => returned_name = closure_to_apply.execute_ast(self, new_scope, None).0,
+            returned_name = match closure_to_apply.jump_points {
+                Some(_) => {
+                    closure_to_apply
+                        .execute_ast(self, new_scope, arg_to_switch_on)
+                        .0
+                }
+
+                //last arg and no jump points, we just with no switch key
+                None => closure_to_apply.execute_ast(self, new_scope, None).0,
             }
         }
         returned_name
     }
+
     fn putstrln_behaviour(&mut self, arg: &str) {
         // get printf linked from c
         let printf_type = self
@@ -137,6 +126,7 @@ impl<'ctx> CodeGen<'ctx> {
             .i32_type()
             .fn_type(&[self.context.i8_type().ptr_type(0.into()).into()], true);
         let printf = self.module.add_function("printf", printf_type, None);
+        let zero = *self.get_int("zero".to_string()).unwrap();
 
         // Get the arg pointer from the symbol table
         self.get_and_evaluate_from_scope(arg);
@@ -147,18 +137,13 @@ impl<'ctx> CodeGen<'ctx> {
             symbol_types::SymTableEntry::AdtDef(..) => Err("cannot print ADT definition"),
             symbol_types::SymTableEntry::GenClos(..) => Err("cannot print closure"),
             symbol_types::SymTableEntry::Ast(..) => Err("cannot print frozen"),
+            _ => panic!("cannot print this type"),
         }
         .unwrap();
         //A little convoluted but we basically make a format string and BasicMetadataValueEnum out
         //of the type in the entry
         let (format_string, str_to_print) = match prim_pointer {
             symbol_types::PrimPtrs::Global(string_value) => {
-                let zero = *self
-                    .scopes
-                    .get_value_from_scope(&self.scope, "zero")
-                    .unwrap()
-                    .get_int()
-                    .unwrap();
                 // Use `build_gep` to get pointer to string rather than char array
                 let string_ptr = unsafe {
                     self.builder.build_gep(
@@ -180,7 +165,7 @@ impl<'ctx> CodeGen<'ctx> {
                 )),
                 _ => Err("Print not supported for other basic values"),
             },
-            symbol_types::PrimPtrs::AdtConst(..) => Err("Print not supported for ADT constructors"),
+            symbol_types::PrimPtrs::Constructor(_) => panic!("print not supportd on constructor"),
         }
         .unwrap();
         let global_str = self
@@ -270,6 +255,7 @@ impl<'ctx> CodeGen<'ctx> {
                 let arm_value;
 
                 //extract the value we look for when switching
+                //TODO: fix this for applied constructor
                 let switch_type;
                 if switching.grammar_name() == "literal" {
                     arm_value = switching
@@ -278,9 +264,16 @@ impl<'ctx> CodeGen<'ctx> {
                         .parse::<u64>()
                         .unwrap();
                     switch_type = symbol_types::SwitchType::Int
-                } else if switching.grammar_name() == "constructor" {
+                } else if switching.grammar_name() == "name" {
+                    arm_value = self
+                        .scopes
+                        .get_constructor(
+                            &self.scope,
+                            switching.utf8_text(self.source_code).unwrap(),
+                        )
+                        .unwrap()
+                        .get_tag();
                     switch_type = symbol_types::SwitchType::Constructor;
-                    panic!("matching not implemented for constructors yet")
                 } else {
                     panic!("Matching only implemented for integers, datacontructors, or variables, last pattern is a {}",switching.grammar_name())
                 }
@@ -295,7 +288,6 @@ impl<'ctx> CodeGen<'ctx> {
                     new_point.add_point(arm_value, old_default_closure);
                     closure.jump_points = Some(new_point);
                 }
-
                 entry_to_add_back = symbol_types::SymTableEntry::closure_to_entry(closure);
             }
         }
@@ -304,5 +296,152 @@ impl<'ctx> CodeGen<'ctx> {
             .add_symbol_to_scope(&self.scope, func_name.clone(), entry_to_add_back);
 
         func_name
+    }
+    pub fn get_int(&mut self, name: String) -> Result<&inkwell::values::IntValue<'ctx>, String> {
+        let int = match self
+            .scopes
+            .get_value_from_scope(&self.scope, &name)
+            .unwrap()
+        {
+            symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Basic(
+                inkwell::values::BasicValueEnum::IntValue(_),
+            )) => true,
+            symbol_types::SymTableEntry::Pointer(_) => false,
+            _ => panic!("expected integer or pointer"),
+        };
+        if int {
+            match self
+                .scopes
+                .get_value_from_scope(&self.scope, &name)
+                .unwrap()
+            {
+                symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Basic(
+                    inkwell::values::BasicValueEnum::IntValue(int_ptr),
+                )) => Ok(int_ptr),
+                _ => Err("Expected integer".to_string()),
+            }
+        } else {
+            let recieved_ptr = self.scopes.recieve_owned_entry(&self.scope, &name).unwrap();
+            match recieved_ptr {
+                SymTableEntry::Pointer(ptr) => {
+                    let real_payload_ptr = self
+                        .builder
+                        .build_bit_cast(
+                            ptr,
+                            self.context.i32_type().ptr_type(0.into()),
+                            "cast_payload",
+                        )
+                        .unwrap()
+                        .into_pointer_value();
+                    let loaded_payload = self
+                        .builder
+                        .build_load(real_payload_ptr, "load_real_payload")
+                        .unwrap()
+                        .into_int_value();
+                    self.scopes.add_symbol_to_scope(
+                        &self.scope,
+                        name.clone(),
+                        symbol_types::SymTableEntry::int_to_entry(loaded_payload),
+                    );
+
+                    match self
+                        .scopes
+                        .get_value_from_scope(&self.scope, &name.clone())
+                        .unwrap()
+                    {
+                        symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Basic(
+                            inkwell::values::BasicValueEnum::IntValue(intptr),
+                        )) => Ok(intptr),
+                        _ => panic!("This should never be seen"),
+                    }
+                }
+
+                _ => panic!("expected integer"),
+            }
+        }
+    }
+    pub fn get_constructor_literal(
+        &mut self,
+        name: String,
+        expected_type_key: String,
+    ) -> Result<&data_constructors::ConstructorLiteral<'ctx>, String> {
+        let constr = match self
+            .scopes
+            .get_value_from_scope(&self.scope, &name)
+            .unwrap()
+        {
+            symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(con)) => true,
+            symbol_types::SymTableEntry::Pointer(_) => false,
+            _ => panic!("Expected ADT"),
+        };
+        if constr {
+            match self
+                .scopes
+                .get_value_from_scope(&self.scope, &name)
+                .unwrap()
+            {
+                symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(con)) => {
+                    Ok(con)
+                }
+                _ => Err("Expected Int".to_string()),
+            }
+        } else {
+            let recieved_ptr = self.scopes.recieve_owned_entry(&self.scope, &name).unwrap();
+            match recieved_ptr {
+                symbol_types::SymTableEntry::Pointer(ptr) => {
+                    let expected_type = self
+                        .scopes
+                        .get_value_from_scope(&self.scope, &expected_type_key)
+                        .unwrap()
+                        .get_adt()
+                        .unwrap();
+                    let real_payload_ptr = self
+                        .builder
+                        .build_bit_cast(
+                            ptr,
+                            expected_type.type_llvm.ptr_type(0.into()),
+                            "cast_payload",
+                        )
+                        .unwrap()
+                        .into_pointer_value();
+                    let loaded_payload = self
+                        .builder
+                        .build_load(real_payload_ptr, "load_real_payload")
+                        .unwrap()
+                        .into_struct_value();
+
+                    let payload_constr_lit = data_constructors::ConstructorLiteral::new(
+                        loaded_payload,
+                        expected_type.constructor_names[0].clone(),
+                    );
+                    self.scopes.add_symbol_to_scope(
+                        &self.scope,
+                        name.clone(),
+                        symbol_types::SymTableEntry::adt_constructor_to_entry(payload_constr_lit),
+                    );
+
+                    match self
+                        .scopes
+                        .get_value_from_scope(&self.scope, &name.clone())
+                        .unwrap()
+                    {
+                        symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(
+                            con,
+                        )) => Ok(con),
+                        _ => panic!("This should never be seen"),
+                    }
+                }
+                _ => Err("Expected ptr".to_string()),
+            }
+        }
+    }
+    pub fn get_constructor_literal_no_pointer_check(
+        &self,
+        name: &str,
+    ) -> Result<&data_constructors::ConstructorLiteral<'ctx>, String> {
+        match self.scopes.get_value_from_scope(&self.scope, name).unwrap() {
+            symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(con)) => Ok(con),
+            _ => Err("expected constructor".to_string()),
+        }
     }
 }

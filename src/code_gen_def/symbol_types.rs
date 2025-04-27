@@ -1,10 +1,15 @@
+use inkwell::values::IntValue;
+use inkwell::values::PointerValue;
+use inkwell::values::StructValue;
+
 use super::class;
 use super::class::GeneralisedClosure;
-use super::data_constructors::Constructor;
+use super::data_constructors::ConstructorLiteral;
 use super::data_constructors::ADT;
 use super::scoping;
 use super::scoping::ScopeId;
 use super::CodeGen;
+use core::panic;
 use std::iter::zip;
 use std::mem;
 use std::rc::Rc;
@@ -189,18 +194,37 @@ impl<'a> Closure<'a> {
                 code_generator.function,
                 &format!("merge_block{}", code_generator.sym_counter.increment()),
             );
+            let mut constructor = false;
+
+            //get value to switch on:
+            // - value itself if switch key is int
+            // - tag section of the struct if constructor
+            let arg_to_switch = match code_generator
+                .scopes
+                .get_value_from_scope(&self.scope, &this_closure_switch_key.clone().unwrap())
+                .unwrap()
+            {
+                SymTableEntry::Prim(PrimPtrs::Basic(
+                    inkwell::values::BasicValueEnum::IntValue(int),
+                )) => *int,
+
+                //TODO: move payload to scope depending on tag
+                SymTableEntry::Prim(PrimPtrs::Constructor(constr)) => {
+                    constructor = true;
+                    code_generator
+                        .builder
+                        .build_extract_value(constr.struct_value, 0, "tag")
+                        .unwrap()
+                        .into_int_value()
+                }
+                _ => panic!("Argument passed not supported"),
+            };
+
             //create switch LLVM IR
             //code_generator.scopes.debug_print_in_scope(&self.scope);
-            let _ = code_generator.builder.build_switch(
-                *code_generator
-                    .scopes
-                    .get_value_from_scope(&self.scope, &this_closure_switch_key.unwrap())
-                    .unwrap()
-                    .get_int()
-                    .unwrap(),
-                default_block,
-                &blocks,
-            );
+            let _ = code_generator
+                .builder
+                .build_switch(arg_to_switch, default_block, &blocks);
 
             //collect blocks only into mut vec
             let mut basic_block_list = blocks
@@ -215,11 +239,11 @@ impl<'a> Closure<'a> {
                 //if we are trying to compile from a returned closure
                 ClosureUnion::Closure(clos) => {
                     //for each jump point execute it
-
                     for (subclosure, new_block) in zip(&jump_point.possible_asts, &basic_block_list)
                     {
                         code_generator.builder.position_at_end(*new_block);
                         code_generator.basic_block = *new_block;
+
                         result_names_and_blocks.push(match subclosure {
                             ClosureUnion::Closure(subclosure) => subclosure.execute_ast(
                                 code_generator,
@@ -231,10 +255,6 @@ impl<'a> Closure<'a> {
                                 *new_block,
                             ),
                         });
-                        code_generator
-                            .builder
-                            .build_unconditional_branch(merge_block)
-                            .expect("unconditional branch build failed");
                     }
 
                     //populate default case
@@ -249,10 +269,22 @@ impl<'a> Closure<'a> {
                 //if we are trying to compile from a collected closure
                 ClosureUnion::ClosureAux(clos) => {
                     //for each jump point execute it
-                    for (subclosure, new_block) in zip(&jump_point.possible_asts, &basic_block_list)
-                    {
+                    for ((subclosure, new_block), switch) in zip(
+                        zip(&jump_point.possible_asts, &basic_block_list),
+                        &self.jump_points.as_ref().unwrap().switches,
+                    ) {
                         code_generator.builder.position_at_end(*new_block);
                         code_generator.basic_block = *new_block;
+
+                        if constructor {
+                            self.unwrap_field(
+                                *switch,
+                                this_closure_switch_key.clone().unwrap(),
+                                code_generator,
+                                parse_arg(*clos.next_pattern(), code_generator),
+                            );
+                        }
+
                         result_names_and_blocks.push(match subclosure {
                             ClosureUnion::Closure(subclosure) => subclosure.execute_ast(
                                 code_generator,
@@ -264,24 +296,27 @@ impl<'a> Closure<'a> {
                                 *new_block,
                             ),
                         });
+                        //populate default case
 
-                        code_generator
-                            .builder
-                            .build_unconditional_branch(merge_block)
-                            .expect("unconditional branch build failed");
+                        code_generator.builder.position_at_end(default_block);
+
+                        code_generator.basic_block = default_block;
+                        if constructor {
+                            self.unwrap_field(
+                                self.jump_points.as_ref().unwrap().switches.len() as u64,
+                                this_closure_switch_key.clone().unwrap(),
+                                code_generator,
+                                parse_arg(*clos.next_pattern(), code_generator),
+                            );
+                        }
+
+                        result_names_and_blocks
+                            .push((code_generator.recursive_compile(&clos.ast), default_block));
                     }
-                    //populate default case
-                    code_generator.builder.position_at_end(default_block);
-                    code_generator.basic_block = default_block;
-                    result_names_and_blocks
-                        .push((code_generator.recursive_compile(&clos.ast), default_block));
                 }
             }
+
             //jump back from default to merge block
-            code_generator
-                .builder
-                .build_unconditional_branch(merge_block)
-                .expect("unconditional branch build failed");
 
             code_generator.builder.position_at_end(merge_block);
             code_generator.basic_block = merge_block;
@@ -298,6 +333,33 @@ impl<'a> Closure<'a> {
                 SymTableEntry::Prim(PrimPtrs::Basic(_)) => {
                     //build phi
 
+                    println!("{:?}", result_names_and_blocks);
+
+                    let results: Vec<String> = result_names_and_blocks
+                        .iter()
+                        .map(|(result, _)| result.clone())
+                        .collect();
+                    let int_values: Vec<inkwell::values::IntValue<'_>> = result_names_and_blocks
+                        .iter()
+                        .map(|(result, block)| {
+                            code_generator.builder.position_at_end(*block);
+
+                            let int = *code_generator.get_int(result.to_string()).unwrap();
+                            code_generator
+                                .builder
+                                .build_unconditional_branch(merge_block)
+                                .expect("unconditional branch build failed");
+                            int
+                        })
+                        .collect();
+
+                    code_generator.builder.position_at_end(merge_block);
+                    let ref_block_pairs: Vec<(
+                        &dyn inkwell::values::BasicValue<'_>,
+                        inkwell::basic_block::BasicBlock<'_>,
+                    )> = zip(&int_values, basic_block_list)
+                        .map(|(x, y)| (x as &dyn inkwell::values::BasicValue<'_>, y))
+                        .collect();
                     let phi = code_generator
                         .builder
                         .build_phi(
@@ -305,31 +367,50 @@ impl<'a> Closure<'a> {
                             &format!("Result{}", code_generator.sym_counter.increment()),
                         )
                         .unwrap(); //TODO: check whether our use case would ever have a different type
-                    let result_block_pairs: Vec<(
-                        &dyn inkwell::values::BasicValue<'_>,
-                        inkwell::basic_block::BasicBlock<'_>,
-                    )> = result_names_and_blocks
-                        .iter()
-                        .map(|(x, y)| {
-                            (
-                                code_generator
-                                    .scopes
-                                    .get_value_from_scope(&code_generator.scope, x)
-                                    .unwrap()
-                                    .get_int()
-                                    .unwrap()
-                                    as &dyn inkwell::values::BasicValue,
-                                *y,
-                            )
-                        })
+
+                    phi.add_incoming(&ref_block_pairs);
+
+                    result_names_and_blocks = zip(results, ref_block_pairs)
+                        .map(|(result, (_, block))| (result, block))
                         .collect();
-                    phi.add_incoming(&result_block_pairs);
                     result_value =
                         SymTableEntry::int_to_entry(phi.as_basic_value().into_int_value());
                 }
 
                 //if we return a closure, build a new closure that switches on the branches from before.
                 SymTableEntry::Clos(_) => {
+                    let branch_indexes: Vec<String> = (0..basic_block_list.len())
+                        .map(|x| code_generator.allocate_literal_int(x as i32))
+                        .collect();
+
+                    let int_values: Vec<inkwell::values::IntValue<'_>> =
+                        zip(branch_indexes, &basic_block_list)
+                            .into_iter()
+                            .map(|(x, block)| {
+                                code_generator.builder.position_at_end(*block);
+
+                                let int = *code_generator.get_int(x).unwrap();
+
+                                code_generator
+                                    .builder
+                                    .build_unconditional_branch(merge_block)
+                                    .expect("unconditional branch build failed");
+                                int
+                            })
+                            .collect();
+
+                    code_generator.builder.position_at_end(merge_block);
+
+                    let result_block_pairs: Vec<(
+                        &dyn inkwell::values::BasicValue<'_>,
+                        inkwell::basic_block::BasicBlock<'_>,
+                    )> = zip(
+                        int_values
+                            .iter()
+                            .map(|x| x as &dyn inkwell::values::BasicValue<'_>),
+                        basic_block_list,
+                    )
+                    .collect();
                     let phi = code_generator
                         .builder
                         .build_phi(
@@ -337,26 +418,8 @@ impl<'a> Closure<'a> {
                             &format!("Result{}", code_generator.sym_counter.increment()),
                         )
                         .unwrap();
-                    let branch_indexes: Vec<String> = (0..basic_block_list.len())
-                        .map(|x| code_generator.allocate_literal_int(x as i32))
-                        .collect();
-                    let result_block_pairs: Vec<(
-                        &dyn inkwell::values::BasicValue<'_>,
-                        inkwell::basic_block::BasicBlock<'_>,
-                    )> = zip(
-                        branch_indexes.into_iter().map(|x| {
-                            code_generator
-                                .scopes
-                                .get_value_from_scope(&code_generator.scope, &x)
-                                .unwrap()
-                                .get_int()
-                                .unwrap()
-                                as &dyn inkwell::values::BasicValue
-                        }),
-                        basic_block_list,
-                    )
-                    .collect();
                     phi.add_incoming(&result_block_pairs);
+
                     //add phi to scope
                     let phi_name = format!("phi{}", code_generator.sym_counter.increment());
                     code_generator.scopes.add_symbol_to_scope(
@@ -431,6 +494,65 @@ impl<'a> Closure<'a> {
 
         (return_key, code_generator.basic_block)
     }
+    //Build and add to scope values based on the branch
+    fn unwrap_field(
+        &self,
+        switch: u64,
+        constr_key: String,
+        code_generator: &mut CodeGen<'a>,
+        template_name: String,
+    ) {
+        //We get the argument literal, then get the ADT, then get the template at the branch we are at
+        let constr_template = code_generator
+            .scopes
+            .get_constructor(&self.scope, &template_name)
+            .unwrap();
+
+        let adt_name = constr_template.type_loc.clone();
+        let _ = code_generator
+            .get_constructor_literal(constr_key.clone(), adt_name.clone())
+            .unwrap();
+
+        let adt = code_generator
+            .scopes
+            .get_value_from_scope(&self.scope, &adt_name)
+            .unwrap()
+            .get_adt()
+            .unwrap();
+
+        let branch_template = code_generator
+            .scopes
+            .get_constructor(
+                &code_generator.scope,
+                &adt.constructor_names[switch as usize],
+            )
+            .unwrap();
+
+        let mut entries_to_add: Vec<(String, SymTableEntry)> = vec![];
+        for (index, field) in adt.fields.iter().enumerate() {
+            if branch_template.fields.iter().any(|x| x == field) {
+                let constr_lit = code_generator
+                    .get_constructor_literal_no_pointer_check(&constr_key)
+                    .unwrap();
+                let payload_value = code_generator
+                    .builder
+                    .build_extract_value(
+                        constr_lit.struct_value,
+                        (index + 1) as u32,
+                        "extract_payload",
+                    )
+                    .unwrap()
+                    .into_pointer_value();
+
+                entries_to_add.push((field.to_string(), SymTableEntry::Pointer(payload_value)));
+            }
+        }
+        for (key, entry) in entries_to_add {
+            code_generator
+                .scopes
+                .add_symbol_to_scope(&self.scope, key, entry);
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ClosureAux<'a> {
@@ -450,7 +572,7 @@ impl<'a> ClosureAux<'a> {
 pub enum PrimPtrs<'a> {
     Basic(inkwell::values::BasicValueEnum<'a>),
     Global(inkwell::values::GlobalValue<'a>),
-    AdtConst(Constructor),
+    Constructor(ConstructorLiteral<'a>),
 }
 #[derive(Clone, Debug)]
 pub enum SymTableEntry<'a> {
@@ -459,6 +581,7 @@ pub enum SymTableEntry<'a> {
     GenClos(class::GeneralisedClosure),
     Prim(PrimPtrs<'a>),
     Ast(Rc<tree_sitter::Node<'a>>),
+    Pointer(PointerValue<'a>),
 }
 
 impl<'a> SymTableEntry<'a> {
@@ -471,15 +594,7 @@ impl<'a> SymTableEntry<'a> {
             _ => Err("Expected String".to_string()),
         }
     }
-    pub fn get_int(&self) -> Result<&inkwell::values::IntValue<'a>, String> {
-        match self {
-            SymTableEntry::Prim(PrimPtrs::Basic(basic_ptr)) => match basic_ptr {
-                inkwell::values::BasicValueEnum::IntValue(int_ptr) => Ok(int_ptr),
-                _ => Err("Expected Int not other basic".to_string()),
-            },
-            _ => Err("Expected Int".to_string()),
-        }
-    }
+
     pub fn get_ast(&self) -> Result<Rc<tree_sitter::Node<'a>>, String> {
         match self {
             SymTableEntry::Ast(ast) => Ok(ast.clone()),
@@ -495,6 +610,13 @@ impl<'a> SymTableEntry<'a> {
             _ => Err("Expected pointer".to_string()),
         }
     }
+    pub fn get_adt(&self) -> Result<&ADT<'a>, String> {
+        match self {
+            SymTableEntry::AdtDef(adt) => Ok(adt),
+            _ => Err("Expected ADT".to_string()),
+        }
+    }
+
     pub fn get_closure(&self) -> Result<&Closure<'a>, String> {
         match self {
             SymTableEntry::Clos(closure) => Ok(closure),
@@ -535,11 +657,19 @@ impl<'a> SymTableEntry<'a> {
     pub fn generalised_closure_to_entry(closure: GeneralisedClosure) -> Self {
         SymTableEntry::GenClos(closure)
     }
-    pub fn adt_constructor_to_entry(constructor: Constructor) -> Self {
-        SymTableEntry::Prim(PrimPtrs::AdtConst(constructor))
+    pub fn adt_constructor_to_entry(constructor: ConstructorLiteral<'a>) -> Self {
+        SymTableEntry::Prim(PrimPtrs::Constructor(constructor))
     }
 }
 
 pub fn tree_to_children(code_ast: tree_sitter::Node) -> Vec<tree_sitter::Node> {
     return code_ast.children(&mut code_ast.walk()).collect();
+}
+pub fn parse_arg(ast: tree_sitter::Node, code_gen: &CodeGen) -> String {
+    match ast.grammar_name() {
+        "name" => ast.utf8_text(code_gen.source_code).unwrap().to_string(),
+        "parens" => parse_arg(ast.child_by_field_name("pattern").unwrap(), code_gen),
+        "apply" => parse_arg(ast.child_by_field_name("function").unwrap(), code_gen),
+        _ => panic!("unseen argument format"),
+    }
 }
