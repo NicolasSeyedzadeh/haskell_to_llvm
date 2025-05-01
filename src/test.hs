@@ -1,6 +1,4 @@
-data MaybeNew x y  = None | Some x y
+mul acc x 0 = acc
+mul acc x y = mul (acc+x) (x) (y-1)
 
-ifNone None = 0
-ifNone (Some x) = x
-
-main= print (ifNone None)
+main= print (mul 0 13 25)

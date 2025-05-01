@@ -64,14 +64,19 @@ impl<'a> ScopeArena<'a> {
         &mut self,
         scope_id: &ScopeId,
         key: &str,
-    ) -> Option<SymTableEntry<'a>> {
+    ) -> Option<(SymTableEntry<'a>, ScopeId)> {
         let scope = self
             .scopes
             .get(scope_id)
             .expect("Trying to recieve from scope that is not in the Arena");
 
         match scope.get_symbol(key) {
-            Some(_) => self.scopes.get_mut(scope_id).unwrap().remove_symbol(key),
+            Some(_) => self
+                .scopes
+                .get_mut(scope_id)
+                .unwrap()
+                .remove_symbol(key)
+                .map(|x| (x, *scope_id)),
             None => scope
                 .parent_scope
                 .and_then(|parent_id| self.recieve_owned_entry(&parent_id, key)),

@@ -1,7 +1,6 @@
 use crate::code_gen_def::class::GeneralisedClosure;
 use crate::code_gen_def::data_constructors;
 use crate::code_gen_def::data_constructors::ADT;
-use crate::code_gen_def::scoping;
 use crate::code_gen_def::symbol_types;
 use crate::code_gen_def::CodeGen;
 use std::iter::zip;
@@ -26,11 +25,12 @@ impl<'ctx> CodeGen<'ctx> {
             "apply" => {
                 let rec = &ast.child_by_field_name("function").unwrap();
                 match rec.kind() {
-                    "variable" => {
+                    "variable" | "apply" | "parens" => {
                         let func = self.recursive_compile(rec);
                         let arg = Rc::new(ast.child_by_field_name("argument").unwrap());
                         self.apply_fn(func, arg)
                     }
+
                     "constructor" => {
                         let i32_type = self.context.i32_type();
                         let i8_ptr_type: inkwell::types::PointerType<'_> =
@@ -40,7 +40,7 @@ impl<'ctx> CodeGen<'ctx> {
                             self.recursive_compile(&ast.child_by_field_name("argument").unwrap());
                         let constructor = self
                             .scopes
-                            .get_constructor(&self.scope, &constructor_key)
+                            .get_constructor(&self.scope, constructor_key)
                             .unwrap();
                         let tag = constructor.get_tag();
                         let adt = self
@@ -52,36 +52,33 @@ impl<'ctx> CodeGen<'ctx> {
                         let tag_value: inkwell::values::IntValue<'_> =
                             i32_type.const_int(tag, false);
 
-                        let payload_ptr;
-
                         let undef = adt.type_llvm.get_undef();
                         //if the argument is an int store it with a pointer
-                        match self.scopes.get_value_from_scope(&self.scope, &arg).unwrap() {
-                            symbol_types::SymTableEntry::Prim(PrimPtrs::Basic(_)) => {
-                                let arg_payload = *self.get_int(arg).unwrap();
-                                let alloca =
-                                    self.builder.build_alloca(i32_type, "lit_payload").unwrap();
-                                let _ = self.builder.build_store(alloca, arg_payload);
-                                payload_ptr = self
-                                    .builder
-                                    .build_bit_cast(alloca, i8_ptr_type, "payload_cast")
-                                    .unwrap();
-                            }
-                            symbol_types::SymTableEntry::Prim(PrimPtrs::Constructor(_)) => {
-                                let arg_payload = self
-                                    .get_constructor_literal(arg, constructor.type_loc.clone())
-                                    .unwrap()
-                                    .struct_value;
-                                let alloca =
-                                    self.builder.build_alloca(i32_type, "lit_payload").unwrap();
-                                let _ = self.builder.build_store(alloca, arg_payload);
-                                payload_ptr = self
-                                    .builder
-                                    .build_bit_cast(alloca, i8_ptr_type, "payload_cast")
-                                    .unwrap();
-                            }
-                            _ => panic!("Only ADT and Int supported as ADT field"),
-                        };
+                        let payload_ptr =
+                            match self.scopes.get_value_from_scope(&self.scope, &arg).unwrap() {
+                                symbol_types::SymTableEntry::Prim(PrimPtrs::Basic(_)) => {
+                                    let arg_payload = *self.get_int(arg).unwrap();
+                                    let alloca =
+                                        self.builder.build_alloca(i32_type, "lit_payload").unwrap();
+                                    let _ = self.builder.build_store(alloca, arg_payload);
+                                    self.builder
+                                        .build_bit_cast(alloca, i8_ptr_type, "payload_cast")
+                                        .unwrap()
+                                }
+                                symbol_types::SymTableEntry::Prim(PrimPtrs::Constructor(_)) => {
+                                    let arg_payload = self
+                                        .get_constructor_literal(arg, constructor.type_loc.clone())
+                                        .unwrap()
+                                        .struct_value;
+                                    let alloca =
+                                        self.builder.build_alloca(i32_type, "lit_payload").unwrap();
+                                    let _ = self.builder.build_store(alloca, arg_payload);
+                                    self.builder
+                                        .build_bit_cast(alloca, i8_ptr_type, "payload_cast")
+                                        .unwrap()
+                                }
+                                _ => panic!("Only ADT and Int supported as ADT field"),
+                            };
 
                         let with_tag = self
                             .builder
@@ -135,6 +132,7 @@ impl<'ctx> CodeGen<'ctx> {
                 //return nothing as we have completed the bind
                 "".to_string()
             }
+
             "parens" => self.recursive_compile(&ast.child_by_field_name("expression").unwrap()),
             "infix" => {
                 let operator =
@@ -247,7 +245,7 @@ impl<'ctx> CodeGen<'ctx> {
                     let constructor_key = ast.utf8_text(self.source_code).unwrap();
                     let constructor = self
                         .scopes
-                        .get_constructor(&self.scope, &constructor_key)
+                        .get_constructor(&self.scope, constructor_key)
                         .unwrap();
                     let tag = constructor.get_tag();
                     let adt = self
@@ -316,6 +314,8 @@ impl<'ctx> CodeGen<'ctx> {
 
                 }*/
             }
+            //for some reason + goes to an "operator" node but - goes to a "-" node
+            "-" => "-".to_string(),
 
             _ => panic!("Unimplemented grammar node: {}", ast.grammar_name()),
         }

@@ -1,5 +1,6 @@
 use crate::code_gen_def::symbol_types;
 use crate::code_gen_def::CodeGen;
+use inkwell::basic_block::BasicBlock;
 use inkwell::values::BasicValueEnum;
 use std::rc::Rc;
 
@@ -20,30 +21,49 @@ impl FunctionBehaviour {
 }
 
 impl<'ctx> CodeGen<'ctx> {
+    pub fn position_at_start(&mut self, block: inkwell::basic_block::BasicBlock) {
+        match block.get_last_instruction() {
+            None => self.builder.position_at_end(block),
+            Some(x) => self.builder.position_before(&x),
+        }
+    }
+    pub fn get_and_eval_indirect(&self, name: &str) -> &SymTableEntry<'ctx> {
+        match self.scopes.get_value_from_scope(&self.scope, name).unwrap() {
+            symbol_types::SymTableEntry::Indirect(x) => self.get_and_eval_indirect(&x),
+            x => &x,
+        }
+    }
     //if the value is frozen then eval and replace, else just return
-    fn get_and_evaluate_from_scope(&mut self, key: &str) {
+    pub fn get_and_evaluate_from_scope(&mut self, key: &str) {
         if let Some(symbol_types::SymTableEntry::Ast(_)) =
             self.scopes.get_value_from_scope(&self.scope, key)
         {
             //panic!("{}",self.scopes.get_value_from_scope(&self.scope, key).unwrap().get_ast().unwrap());
-            let frozen_entry = self.scopes.recieve_owned_entry(&self.scope, key).unwrap();
+            let (frozen_entry, found_scope) =
+                self.scopes.recieve_owned_entry(&self.scope, key).unwrap();
             let frozen_ast = frozen_entry.get_ast().unwrap();
+
             let computation_result = self.recursive_compile(&frozen_ast);
             let evaluated = self
                 .scopes
                 .recieve_owned_entry(&self.scope, &computation_result)
-                .unwrap();
+                .unwrap()
+                .0;
             self.scopes
-                .add_symbol_to_scope(&self.scope, key.to_string(), evaluated.clone());
+                .add_symbol_to_scope(&found_scope, key.to_string(), evaluated.clone());
         };
     }
 
     fn plus(&mut self, left: String, right: String) -> String {
         //must be int if type checked
-
         self.get_and_evaluate_from_scope(&left);
         self.get_and_evaluate_from_scope(&right);
-
+        println!(
+            "Building add between {} and {} in basic block {:?}",
+            left.clone(),
+            right.clone(),
+            self.basic_block
+        );
         let lhs = *self.get_int(left).unwrap();
 
         let rhs = *self.get_int(right).unwrap();
@@ -60,29 +80,93 @@ impl<'ctx> CodeGen<'ctx> {
         );
         name
     }
+    fn minus(&mut self, left: String, right: String) -> String {
+        //must be int if type checked
+
+        self.get_and_evaluate_from_scope(&left);
+        self.get_and_evaluate_from_scope(&right);
+        println!(
+            "Building sub between {} and {} in basic block {:?}",
+            left.clone(),
+            right.clone(),
+            self.basic_block
+        );
+
+        let lhs = *self.get_int(left).unwrap();
+
+        let rhs = *self.get_int(right).unwrap();
+
+        let next = self.sym_counter.increment();
+        let name = format!("sub_result{}", next);
+
+        let intval = self.builder.build_int_sub(lhs, rhs, &name).unwrap();
+
+        self.scopes.add_symbol_to_scope(
+            &self.scope,
+            name.clone(),
+            symbol_types::SymTableEntry::int_to_entry(intval),
+        );
+        name
+    }
+    fn mult(&mut self, left: String, right: String) -> String {
+        //must be int if type checked
+
+        self.get_and_evaluate_from_scope(&left);
+        self.get_and_evaluate_from_scope(&right);
+
+        let lhs = *self.get_int(left).unwrap();
+
+        let rhs = *self.get_int(right).unwrap();
+
+        let next = self.sym_counter.increment();
+        let name = format!("mul_result{}", next);
+
+        let intval = self.builder.build_int_mul(lhs, rhs, &name).unwrap();
+
+        self.scopes.add_symbol_to_scope(
+            &self.scope,
+            name.clone(),
+            symbol_types::SymTableEntry::int_to_entry(intval),
+        );
+        name
+    }
     pub fn infix_behaviour(&mut self, op: &str, left: String, right: String) -> String {
         match op {
             "+" => self.plus(left, right),
+            "-" => self.minus(left, right),
+            "*" => self.mult(left, right),
             _ => panic!("operand not known"),
         }
     }
     fn defined_behaviour(&mut self, func_name: &str, arg: Rc<tree_sitter::Node<'ctx>>) -> String {
         //the function we want to apply
+        //TODO: make this not clone the closure
+        //The problem is that we need a reference to the closure to get everything we need from it
+        //but holding the reference holds a refernce to the code generator meaning we cant execute
+        //it later
         let closure_to_apply = self
             .scopes
-            .recieve_owned_entry(&self.scope, func_name)
+            .get_value_from_scope(&self.scope, func_name)
             .unwrap()
-            .get_closure_move()
-            .unwrap();
+            .get_closure()
+            .unwrap()
+            .clone();
 
         let patterns_left = closure_to_apply.patterns_left();
         let first_pattern = closure_to_apply.next_pattern();
         let returned_name;
         let arg_entry = symbol_types::SymTableEntry::Ast(arg.clone());
-        let new_scope = self.scopes.new_scope(Some(closure_to_apply.scope));
+
+        let new_scope = if *closure_to_apply.currently_executing.borrow() {
+            self.scopes.new_scope(Some(self.scope))
+        } else {
+            self.scopes.new_scope(Some(closure_to_apply.scope))
+        };
 
         //if we dont have a complete application, make a new closure with the new scope and patterns
         if patterns_left > 1 {
+            let new_closure = closure_to_apply.clone_with_new_patterns(new_scope);
+
             self.scopes.add_symbol_to_scope(
                 &new_scope,
                 first_pattern
@@ -91,8 +175,9 @@ impl<'ctx> CodeGen<'ctx> {
                     .to_string(),
                 arg_entry,
             );
+
             //make new closure and add it to old scope
-            let new_closure = closure_to_apply.clone_with_new_patterns(new_scope);
+
             let next = self.sym_counter.increment();
             returned_name = format!("{}{}", "closurelit", next);
             self.scopes.add_symbol_to_scope(
@@ -103,19 +188,32 @@ impl<'ctx> CodeGen<'ctx> {
         }
         //if we have a complete application, determine whether we need the switch and execute the ast
         else {
-            let arg_to_switch_on = Some(self.recursive_compile(&arg));
             //if theres a jump point, execute the arg and use it as a switch key
             returned_name = match closure_to_apply.jump_points {
                 Some(_) => {
+                    let arg_to_switch_on = Some(self.recursive_compile(&arg)).unwrap();
+
                     closure_to_apply
-                        .execute_ast(self, new_scope, arg_to_switch_on)
+                        .execute_ast(self, new_scope, Some(arg_to_switch_on))
                         .0
                 }
 
                 //last arg and no jump points, we just with no switch key
-                None => closure_to_apply.execute_ast(self, new_scope, None).0,
+                None => {
+                    //Allocate arg
+                    self.scopes.add_symbol_to_scope(
+                        &self.scope,
+                        first_pattern
+                            .utf8_text(self.source_code)
+                            .unwrap()
+                            .to_string(),
+                        symbol_types::SymTableEntry::Ast(arg),
+                    );
+                    closure_to_apply.execute_ast(self, new_scope, None).0
+                }
             }
         }
+
         returned_name
     }
 
@@ -140,6 +238,7 @@ impl<'ctx> CodeGen<'ctx> {
             _ => panic!("cannot print this type"),
         }
         .unwrap();
+
         //A little convoluted but we basically make a format string and BasicMetadataValueEnum out
         //of the type in the entry
         let (format_string, str_to_print) = match prim_pointer {
@@ -168,6 +267,7 @@ impl<'ctx> CodeGen<'ctx> {
             symbol_types::PrimPtrs::Constructor(_) => panic!("print not supportd on constructor"),
         }
         .unwrap();
+
         let global_str = self
             .builder
             .build_global_string_ptr(format_string, "fmt")
@@ -196,6 +296,12 @@ impl<'ctx> CodeGen<'ctx> {
     }
     pub fn allocate_literal_int(&mut self, int: i32) -> String {
         let lit_name = format!("{}{}", "intlit", self.sym_counter.increment());
+        println!(
+            "Building {} {} in basic block {:?}",
+            lit_name,
+            int.clone(),
+            self.basic_block
+        );
         let int_ptr = self.context.i32_type().const_int(int as u64, true);
         self.scopes.add_symbol_to_scope(
             &self.scope,
@@ -216,6 +322,7 @@ impl<'ctx> CodeGen<'ctx> {
     }
     pub fn construct_fn(&mut self, func_ast: &tree_sitter::Node<'ctx>) -> String {
         //parse function name
+
         let func_name = self.recursive_compile(&func_ast.child_by_field_name("name").unwrap());
         //get the args
         let patterns =
@@ -243,9 +350,10 @@ impl<'ctx> CodeGen<'ctx> {
                         None,
                         closure_to_add,
                         self.scopes.new_scope(Some(self.scope)),
+                        func_name.clone(),
                     ));
             }
-            Some(closure_list) => {
+            Some((closure_list, _)) => {
                 let mut closure = closure_list.get_closure_move().unwrap();
                 let switching = closure.last_pattern();
 
@@ -256,14 +364,12 @@ impl<'ctx> CodeGen<'ctx> {
 
                 //extract the value we look for when switching
                 //TODO: fix this for applied constructor
-                let switch_type;
                 if switching.grammar_name() == "literal" {
                     arm_value = switching
                         .utf8_text(self.source_code)
                         .unwrap()
                         .parse::<u64>()
                         .unwrap();
-                    switch_type = symbol_types::SwitchType::Int
                 } else if switching.grammar_name() == "name" {
                     arm_value = self
                         .scopes
@@ -273,7 +379,6 @@ impl<'ctx> CodeGen<'ctx> {
                         )
                         .unwrap()
                         .get_tag();
-                    switch_type = symbol_types::SwitchType::Constructor;
                 } else {
                     panic!("Matching only implemented for integers, datacontructors, or variables, last pattern is a {}",switching.grammar_name())
                 }
@@ -284,7 +389,7 @@ impl<'ctx> CodeGen<'ctx> {
                 }
                 //make new jump point if second time defined
                 else {
-                    let mut new_point = symbol_types::JumpPoint::new(switch_type);
+                    let mut new_point = symbol_types::JumpPoint::new();
                     new_point.add_point(arm_value, old_default_closure);
                     closure.jump_points = Some(new_point);
                 }
@@ -297,7 +402,9 @@ impl<'ctx> CodeGen<'ctx> {
 
         func_name
     }
+
     pub fn get_int(&mut self, name: String) -> Result<&inkwell::values::IntValue<'ctx>, String> {
+        self.get_and_evaluate_from_scope(&name);
         let int = match self
             .scopes
             .get_value_from_scope(&self.scope, &name)
@@ -305,11 +412,12 @@ impl<'ctx> CodeGen<'ctx> {
         {
             symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Basic(
                 inkwell::values::BasicValueEnum::IntValue(_),
-            )) => true,
-            symbol_types::SymTableEntry::Pointer(_) => false,
+            )) => "true",
+            symbol_types::SymTableEntry::Pointer(_) => "false",
+            symbol_types::SymTableEntry::Indirect(key) => &key.clone(),
             _ => panic!("expected integer or pointer"),
         };
-        if int {
+        if int == "true" {
             match self
                 .scopes
                 .get_value_from_scope(&self.scope, &name)
@@ -320,8 +428,12 @@ impl<'ctx> CodeGen<'ctx> {
                 )) => Ok(int_ptr),
                 _ => Err("Expected integer".to_string()),
             }
-        } else {
-            let recieved_ptr = self.scopes.recieve_owned_entry(&self.scope, &name).unwrap();
+        } else if int == "false" {
+            let recieved_ptr = self
+                .scopes
+                .recieve_owned_entry(&self.scope, &name)
+                .unwrap()
+                .0;
             match recieved_ptr {
                 SymTableEntry::Pointer(ptr) => {
                     let real_payload_ptr = self
@@ -359,6 +471,10 @@ impl<'ctx> CodeGen<'ctx> {
                 _ => panic!("expected integer"),
             }
         }
+        //We are an indirect item
+        else {
+            self.get_int(int.to_string())
+        }
     }
     pub fn get_constructor_literal(
         &mut self,
@@ -370,7 +486,7 @@ impl<'ctx> CodeGen<'ctx> {
             .get_value_from_scope(&self.scope, &name)
             .unwrap()
         {
-            symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(con)) => true,
+            symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(_)) => true,
             symbol_types::SymTableEntry::Pointer(_) => false,
             _ => panic!("Expected ADT"),
         };
@@ -386,7 +502,11 @@ impl<'ctx> CodeGen<'ctx> {
                 _ => Err("Expected Int".to_string()),
             }
         } else {
-            let recieved_ptr = self.scopes.recieve_owned_entry(&self.scope, &name).unwrap();
+            let recieved_ptr = self
+                .scopes
+                .recieve_owned_entry(&self.scope, &name)
+                .unwrap()
+                .0;
             match recieved_ptr {
                 symbol_types::SymTableEntry::Pointer(ptr) => {
                     let expected_type = self

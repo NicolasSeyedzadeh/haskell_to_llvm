@@ -58,8 +58,8 @@ impl GeneralisedClosure {
                     .unwrap()
                     .utf8_text(source)
                     .unwrap();
-                for pattern_index in 0..patterns.len() {
-                    if application == patterns[pattern_index] {
+                for (pattern_index, item) in patterns.iter().enumerate() {
+                    if application == item {
                         inplace.push(pattern_index + 1);
                         break;
                     }

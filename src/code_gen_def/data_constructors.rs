@@ -1,7 +1,5 @@
 use inkwell::values::StructValue;
 
-use super::symbol_types;
-use super::symbol_types::SwitchType;
 use super::CodeGen;
 
 #[derive(Clone, Debug)]
