@@ -7,7 +7,8 @@ mod code_gen_def;
 
 //mod types;
 
-pub fn compile(source_path: &str) {
+pub fn compile(source_path: &str, destination: &str) {
+    println!("{}", source_path);
     let source_code = &fs::read_to_string(source_path).unwrap();
 
     //types::get_types(source_path);
@@ -68,9 +69,10 @@ pub fn compile(source_path: &str) {
 
     let _ = code_generator.builder.build_return(Some(&return_value));
     //code_generator.module.print_to_stderr();
+
     code_generator
         .module
-        .print_to_file("out.ll")
+        .print_to_file(destination)
         .expect("Problem with printing to file");
 }
 

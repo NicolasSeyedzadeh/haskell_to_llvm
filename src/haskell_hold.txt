@@ -1,0 +1,61 @@
+add a b = a + b
+plus3 = add 3
+main = print (plus3 4)
+
+
+if3 3 = 1
+if3 x = x
+main = print (if3 4)
+
+
+add x 0 = x
+add x y = add (x+1) (y-1)
+
+
+if5with3 5 = 2
+if5with3 x = 1
+if5without3 5 = 1
+if5without3 x = 0
+if35 3 = if5with3
+if35 x = if5without3
+main = print ((if35 3) 5)
+
+main = print ((if35 3) 5)
+
+mul x 1 = x
+mul x y = mul (x+x) (y-1)
+
+main= print (mul 3 2)
+
+
+data MaybeNew x  = None | Some x
+
+ifNone None = 0
+ifNone (Some x) = 1
+
+main= print (ifNone (Some 3))
+
+class FunctorNew f where
+  pure :: a -> f a
+  fmapNew :: (a-> b) -> f a -> f b
+
+class Functor f => Applicative f where
+  pure :: a -> f a
+  (<*>) :: f (a -> b) -> f a -> f b
+
+class Applicative m => Monad m where
+  (>>=)       :: m a -> (a -> m b) -> m b
+
+
+
+instance FunctorNew MaybeNew where
+  pure x = Some x
+  fmapNew f None = None
+  fmapNew f (Some x) = Some (f x)
+
+x= fmapNew plus3 (Some 3)
+
+hyperfine  'ghc -o evaluation/Sample1/outputs/outputghc evaluation/Sample1/sample1.hs' --warmup 2
+--prepare 'make clean_eval'
+
+ hyperfine  './target/release/haskell_to_llvm  evaluation/Sample4/outputs/outputdirectllvm evaluation/Sample4/sample4.hs' --warmup 2 --prepare 'make clean_eval'

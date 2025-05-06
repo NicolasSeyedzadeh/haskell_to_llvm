@@ -172,7 +172,6 @@ impl<'a> Closure<'a> {
             .map(|x| parse_arg(**x, code_generator))
             .clone()
             .collect();
-
         //the value of the item supposed to come from the previous block.
         if *parent_closure.currently_executing.borrow() {
             let name = format!("recursive call {}", code_generator.sym_counter.increment());
@@ -255,54 +254,65 @@ impl<'a> Closure<'a> {
                 &format!("merge_block{}", code_generator.sym_counter.increment()),
             );
 
+            //flag for looking into tag
             let mut constructor = false;
+
+            //will hold all entry_block phis, can be none if
             let mut phis = vec![];
             let mut entry_start = vec![];
-            for name in &patterns[..patterns.len() - 1] {
-                let phi_name = &format!("phi_{}_{}", name, code_generator.sym_counter.increment());
+            match self.rec_check(&self.derivative, code_generator.source_code) {
+                true => {
+                    for name in &patterns[..patterns.len() - 1] {
+                        let phi_name =
+                            &format!("phi_{}_{}", name, code_generator.sym_counter.increment());
 
-                let phi = code_generator
-                    .builder
-                    .build_phi(code_generator.context.i32_type(), phi_name)
-                    .unwrap();
+                        let phi = code_generator
+                            .builder
+                            .build_phi(code_generator.context.i32_type(), phi_name)
+                            .unwrap();
 
-                code_generator.scopes.add_symbol_to_scope(
-                    &code_generator.scope,
-                    phi_name.to_string(),
-                    SymTableEntry::int_to_entry(phi.as_basic_value().into_int_value()),
-                );
+                        code_generator.scopes.add_symbol_to_scope(
+                            &code_generator.scope,
+                            phi_name.to_string(),
+                            SymTableEntry::int_to_entry(phi.as_basic_value().into_int_value()),
+                        );
 
-                entry_start.push(*code_generator.get_int(name.to_string()).unwrap());
+                        entry_start.push(*code_generator.get_int(name.to_string()).unwrap());
 
-                code_generator.scopes.add_symbol_to_scope(
-                    &code_generator.scope,
-                    name.to_string(),
-                    SymTableEntry::Indirect(phi_name.to_string()),
-                );
-                phis.push(phi);
+                        code_generator.scopes.add_symbol_to_scope(
+                            &code_generator.scope,
+                            name.to_string(),
+                            SymTableEntry::Indirect(phi_name.to_string()),
+                        );
+                        phis.push(phi);
+                    }
+                    let name: &String = this_closure_switch_key.as_ref().unwrap();
+                    let phi_name =
+                        &format!("phi_{}_{}", name, code_generator.sym_counter.increment());
+
+                    let phi = code_generator
+                        .builder
+                        .build_phi(code_generator.context.i32_type(), phi_name)
+                        .unwrap();
+
+                    code_generator.scopes.add_symbol_to_scope(
+                        &code_generator.scope,
+                        phi_name.to_string(),
+                        SymTableEntry::int_to_entry(phi.as_basic_value().into_int_value()),
+                    );
+
+                    entry_start.push(*code_generator.get_int(name.to_string()).unwrap());
+
+                    code_generator.scopes.add_symbol_to_scope(
+                        &code_generator.scope,
+                        name.to_string(),
+                        SymTableEntry::Indirect(phi_name.to_string()),
+                    );
+                    phis.push(phi);
+                }
+
+                false => println!("non-recursive"),
             }
-            let name: &String = this_closure_switch_key.as_ref().unwrap();
-            let phi_name = &format!("phi_{}_{}", name, code_generator.sym_counter.increment());
-
-            let phi = code_generator
-                .builder
-                .build_phi(code_generator.context.i32_type(), phi_name)
-                .unwrap();
-
-            code_generator.scopes.add_symbol_to_scope(
-                &code_generator.scope,
-                phi_name.to_string(),
-                SymTableEntry::int_to_entry(phi.as_basic_value().into_int_value()),
-            );
-
-            entry_start.push(*code_generator.get_int(name.to_string()).unwrap());
-
-            code_generator.scopes.add_symbol_to_scope(
-                &code_generator.scope,
-                name.to_string(),
-                SymTableEntry::Indirect(phi_name.to_string()),
-            );
-            phis.push(phi);
 
             //get value to switch on:
             // - value itself if switch key is int
@@ -314,12 +324,15 @@ impl<'a> Closure<'a> {
             {
                 SymTableEntry::Prim(PrimPtrs::Basic(
                     inkwell::values::BasicValueEnum::IntValue(int),
-                )) => phis.last().unwrap().as_basic_value().into_int_value(),
+                )) => match phis.last() {
+                    None => int,
+                    Some(phi) => &phi.as_basic_value().into_int_value(),
+                },
 
                 //TODO: move payload to scope depending on tag
                 SymTableEntry::Prim(PrimPtrs::Constructor(constr)) => {
                     constructor = true;
-                    code_generator
+                    &code_generator
                         .builder
                         .build_extract_value(constr.struct_value, 0, "tag")
                         .unwrap()
@@ -328,10 +341,9 @@ impl<'a> Closure<'a> {
                 _ => panic!("Argument passed not supported"),
             };
             //create switch LLVM IR
-            //code_generator.scopes.debug_print_in_scope(&self.scope);
             let _ = code_generator
                 .builder
-                .build_switch(arg_to_switch, default_block, &blocks);
+                .build_switch(*arg_to_switch, default_block, &blocks);
 
             //collect blocks only into mut vec
             let mut basic_block_list = blocks
@@ -671,6 +683,7 @@ impl<'a> Closure<'a> {
                         code_generator.scopes.new_scope(Some(self.scope)),
                         der,
                     );
+                    new_closure.derivative = self.derivative.clone();
                     new_closure.set_switch_key(Some(phi_name.clone()));
 
                     result_value = SymTableEntry::closure_to_entry(new_closure);
@@ -772,6 +785,54 @@ impl<'a> Closure<'a> {
                 .add_symbol_to_scope(&self.scope, key, entry);
         }
     }
+    fn rec_check(&self, derivative: &str, sc: &[u8]) -> bool {
+        Closure::rec_check_wrapped(&*self.get_ast(), derivative, sc)
+    }
+    fn rec_check_wrapped(ast: &tree_sitter::Node<'_>, derivative: &str, sc: &[u8]) -> bool {
+        println!("{}", ast.utf8_text(sc).unwrap());
+        match ast.grammar_name() {
+            "function" => Closure::rec_check_wrapped(
+                &ast.child_by_field_name("name").unwrap(),
+                derivative,
+                sc,
+            ),
+            "apply" => {
+                Closure::rec_check_wrapped(
+                    &ast.child_by_field_name("function").unwrap(),
+                    derivative,
+                    sc,
+                ) || Closure::rec_check_wrapped(
+                    &ast.child_by_field_name("argument").unwrap(),
+                    derivative,
+                    sc,
+                )
+            }
+            "variable" => ast.utf8_text(sc).unwrap() == derivative,
+            "literal" => false,
+            "parens" => Closure::rec_check_wrapped(
+                &ast.child_by_field_name("expression").unwrap(),
+                derivative,
+                sc,
+            ),
+            "infix" => {
+                Closure::rec_check_wrapped(
+                    &ast.child_by_field_name("left_operand").unwrap(),
+                    derivative,
+                    sc,
+                ) || Closure::rec_check_wrapped(
+                    &ast.child_by_field_name("right_operand").unwrap(),
+                    derivative,
+                    sc,
+                )
+            }
+
+            _ => panic!(
+                "Recursive check found unkown grammar node {}",
+                ast.grammar_name()
+            ),
+        }
+    }
+
     fn rebind_match_key(
         &self,
         constructor: bool,

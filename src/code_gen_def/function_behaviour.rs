@@ -1,7 +1,7 @@
 use crate::code_gen_def::symbol_types;
 use crate::code_gen_def::CodeGen;
-use inkwell::basic_block::BasicBlock;
 use inkwell::values::BasicValueEnum;
+use inkwell::values::IntValue;
 use std::rc::Rc;
 
 use super::data_constructors;
@@ -21,6 +21,28 @@ impl FunctionBehaviour {
 }
 
 impl<'ctx> CodeGen<'ctx> {
+    pub fn get_int_or_constructor_tag(
+        &mut self,
+        switch: &str,
+        default: IntValue<'ctx>,
+        constructor: &mut bool,
+    ) -> IntValue<'ctx> {
+        match self.get_and_eval_indirect(switch) {
+            SymTableEntry::Prim(symbol_types::PrimPtrs::Basic(
+                inkwell::values::BasicValueEnum::IntValue(int),
+            )) => default,
+
+            //TODO: move payload to scope depending on tag
+            SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(constr)) => {
+                *constructor = true;
+                self.builder
+                    .build_extract_value(constr.struct_value, 0, "tag")
+                    .unwrap()
+                    .into_int_value()
+            }
+            _ => panic!("Argument passed not supported"),
+        }
+    }
     pub fn position_at_start(&mut self, block: inkwell::basic_block::BasicBlock) {
         match block.get_last_instruction() {
             None => self.builder.position_at_end(block),
@@ -29,8 +51,8 @@ impl<'ctx> CodeGen<'ctx> {
     }
     pub fn get_and_eval_indirect(&self, name: &str) -> &SymTableEntry<'ctx> {
         match self.scopes.get_value_from_scope(&self.scope, name).unwrap() {
-            symbol_types::SymTableEntry::Indirect(x) => self.get_and_eval_indirect(&x),
-            x => &x,
+            symbol_types::SymTableEntry::Indirect(x) => self.get_and_eval_indirect(x),
+            x => x,
         }
     }
     //if the value is frozen then eval and replace, else just return
@@ -58,12 +80,6 @@ impl<'ctx> CodeGen<'ctx> {
         //must be int if type checked
         self.get_and_evaluate_from_scope(&left);
         self.get_and_evaluate_from_scope(&right);
-        println!(
-            "Building add between {} and {} in basic block {:?}",
-            left.clone(),
-            right.clone(),
-            self.basic_block
-        );
         let lhs = *self.get_int(left).unwrap();
 
         let rhs = *self.get_int(right).unwrap();
@@ -85,12 +101,6 @@ impl<'ctx> CodeGen<'ctx> {
 
         self.get_and_evaluate_from_scope(&left);
         self.get_and_evaluate_from_scope(&right);
-        println!(
-            "Building sub between {} and {} in basic block {:?}",
-            left.clone(),
-            right.clone(),
-            self.basic_block
-        );
 
         let lhs = *self.get_int(left).unwrap();
 
@@ -191,7 +201,7 @@ impl<'ctx> CodeGen<'ctx> {
             //if theres a jump point, execute the arg and use it as a switch key
             returned_name = match closure_to_apply.jump_points {
                 Some(_) => {
-                    let arg_to_switch_on = Some(self.recursive_compile(&arg)).unwrap();
+                    let arg_to_switch_on = self.recursive_compile(&arg);
 
                     closure_to_apply
                         .execute_ast(self, new_scope, Some(arg_to_switch_on))
@@ -296,12 +306,6 @@ impl<'ctx> CodeGen<'ctx> {
     }
     pub fn allocate_literal_int(&mut self, int: i32) -> String {
         let lit_name = format!("{}{}", "intlit", self.sym_counter.increment());
-        println!(
-            "Building {} {} in basic block {:?}",
-            lit_name,
-            int.clone(),
-            self.basic_block
-        );
         let int_ptr = self.context.i32_type().const_int(int as u64, true);
         self.scopes.add_symbol_to_scope(
             &self.scope,

@@ -1,4 +1,5 @@
-mul acc x 0 = acc
-mul acc x y = mul (acc+x) (x) (y-1)
+add x y = x+y
+arg1 = add 0 0
+arg2 = add 0 0
 
-main= print (mul 0 13 25)
+main = print (add arg1 arg2)
