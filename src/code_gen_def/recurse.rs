@@ -51,7 +51,7 @@ impl<'ctx> CodeGen<'ctx> {
                             .unwrap()
                             .get_adt()
                             .unwrap();
-                        let ty = adt.type_llvm.clone();
+                        let ty = adt.type_llvm;
                         let tag_value: inkwell::values::IntValue<'_> =
                             i32_type.const_int(tag, false);
 

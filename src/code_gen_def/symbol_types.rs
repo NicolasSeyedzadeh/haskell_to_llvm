@@ -35,7 +35,7 @@ impl<'a> ClosureUnion<'a> {
             ClosureUnion::ClosureAux(clos) => clos.next_pattern(),
         }
     }
-    pub fn patterns(&self) -> &Vec<Rc<tree_sitter::Node<'_>>> {
+    pub fn _patterns(&self) -> &Vec<Rc<tree_sitter::Node<'_>>> {
         match self {
             ClosureUnion::Closure(clos) => clos.patterns(),
             ClosureUnion::ClosureAux(clos) => &clos.patterns,
@@ -277,19 +277,12 @@ impl<'a> Closure<'a> {
             {
                 SymTableEntry::Prim(PrimPtrs::Constructor(constr)) => (
                     constr.template_key.clone(),
-                    constr
-                        .get_struct_type(code_generator)
-                        .as_basic_type_enum()
-                        .clone(),
+                    constr.get_struct_type(code_generator).as_basic_type_enum(),
                     true,
                 ),
                 _ => (
                     "".to_string(),
-                    code_generator
-                        .context
-                        .i32_type()
-                        .as_basic_type_enum()
-                        .clone(),
+                    code_generator.context.i32_type().as_basic_type_enum(),
                     false,
                 ),
             };
@@ -317,7 +310,6 @@ impl<'a> Closure<'a> {
                                         pattern_type = cons
                                             .get_struct_type(code_generator)
                                             .as_basic_type_enum()
-                                            .clone()
                                     }
                                     _ => panic!("Did not expect string as pattern"),
                                 }
@@ -556,17 +548,17 @@ impl<'a> Closure<'a> {
                                 match this_closure_switch_key {
                                     None => {
                                         for (arg, start) in zip(&patterns, entry_start) {
-                                            code_generator.get_and_evaluate_from_scope(&arg);
+                                            code_generator.get_and_evaluate_from_scope(arg);
                                             //clone reference I think?
                                             entry_vals.push(vec![(start, &previous_block)]);
                                         }
                                     }
                                     Some(ref key) => {
                                         for (arg, start) in zip(&patterns, entry_start) {
-                                            code_generator.get_and_evaluate_from_scope(&arg);
+                                            code_generator.get_and_evaluate_from_scope(arg);
                                             entry_vals.push(vec![(start, &previous_block)]);
                                         }
-                                        code_generator.get_and_evaluate_from_scope(&key);
+                                        code_generator.get_and_evaluate_from_scope(key);
 
                                         match code_generator.get_and_eval_indirect(key) {
                                             SymTableEntry::Prim(prim) => entry_vals
@@ -896,7 +888,7 @@ impl<'a> Closure<'a> {
         }
     }
     fn rec_check(&self, derivative: &str, sc: &[u8]) -> bool {
-        Closure::rec_check_wrapped(&*self.get_ast(), derivative, sc)
+        Closure::rec_check_wrapped(&self.get_ast(), derivative, sc)
     }
     fn rec_check_wrapped(ast: &tree_sitter::Node<'_>, derivative: &str, sc: &[u8]) -> bool {
         match ast.grammar_name() {
@@ -1041,8 +1033,7 @@ pub enum SymTableEntry<'a> {
     Clos(Closure<'a>),
     AdtDef(ADT<'a>),
     GenClos(class::GeneralisedClosure),
-    Constructor_Template(data_constructors::Constructor),
-
+    ConstructorTemplate(data_constructors::Constructor),
     Prim(PrimPtrs<'a>),
     Ast(Rc<tree_sitter::Node<'a>>),
     Pointer(PointerValue<'a>),
@@ -1051,7 +1042,7 @@ pub enum SymTableEntry<'a> {
 }
 
 impl<'a> SymTableEntry<'a> {
-    pub fn get_str(&self) -> Result<&inkwell::values::GlobalValue<'a>, String> {
+    pub fn _get_str(&self) -> Result<&inkwell::values::GlobalValue<'a>, String> {
         match self {
             SymTableEntry::Prim(prim) => match prim {
                 PrimPtrs::Global(global_ptr) => Ok(global_ptr),
@@ -1067,7 +1058,7 @@ impl<'a> SymTableEntry<'a> {
             _ => Err("Expected frozen computation".to_string()),
         }
     }
-    pub fn get_ptr(&self) -> Result<&inkwell::values::PointerValue<'a>, String> {
+    pub fn _get_ptr(&self) -> Result<&inkwell::values::PointerValue<'a>, String> {
         match self {
             SymTableEntry::Prim(PrimPtrs::Basic(basic_ptr)) => match basic_ptr {
                 inkwell::values::BasicValueEnum::PointerValue(ptr) => Ok(ptr),
@@ -1084,7 +1075,7 @@ impl<'a> SymTableEntry<'a> {
     }
     pub fn get_constructor_template(&self) -> Result<&Constructor, String> {
         match self {
-            SymTableEntry::Constructor_Template(cons) => Ok(cons),
+            SymTableEntry::ConstructorTemplate(cons) => Ok(cons),
             _ => Err("Expected Constructor Template".to_string()),
         }
     }
@@ -1133,7 +1124,7 @@ impl<'a> SymTableEntry<'a> {
         SymTableEntry::Prim(PrimPtrs::Constructor(constructor))
     }
     pub fn adt_constructor_template_to_entry(constructor: data_constructors::Constructor) -> Self {
-        SymTableEntry::Constructor_Template(constructor)
+        SymTableEntry::ConstructorTemplate(constructor)
     }
     pub fn delegate_phi(
         ty: BasicTypeEnum,

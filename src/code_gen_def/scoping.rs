@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 
-use super::{
-    data_constructors::{self, Constructor},
-    symbol_types::{self, SymTableEntry},
-};
+use super::symbol_types::{self, SymTableEntry};
 pub type ScopeId = usize;
 pub struct ScopeArena<'a> {
     scopes: HashMap<ScopeId, Scope<'a>>,
@@ -83,7 +80,7 @@ impl<'a> ScopeArena<'a> {
         }
         //self.scopes.get_mut(scope_id).unwrap().remove_symbol(key)
     }
-    pub fn remove_scope(&mut self, scope_id: &ScopeId) {
+    pub fn _remove_scope(&mut self, scope_id: &ScopeId) {
         self.scopes.remove(scope_id);
     }
     pub fn _debug_print_in_scope(&self, scope_id: &ScopeId) {

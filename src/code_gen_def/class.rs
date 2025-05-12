@@ -27,7 +27,7 @@ impl GeneralisedClosure {
             scope,
         }
     }
-    fn register_closure(&mut self, adt: String, closure: String) {
+    fn _register_closure(&mut self, adt: String, closure: String) {
         self.possible_closures.insert(adt, closure);
     }
 

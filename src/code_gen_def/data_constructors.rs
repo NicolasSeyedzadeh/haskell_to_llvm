@@ -99,6 +99,5 @@ impl<'a> ConstructorLiteral<'a> {
             .get_adt()
             .unwrap()
             .type_llvm
-            .into()
     }
 }
