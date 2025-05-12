@@ -40,7 +40,9 @@ impl<'ctx> CodeGen<'ctx> {
                             self.recursive_compile(&ast.child_by_field_name("argument").unwrap());
                         let constructor = self
                             .scopes
-                            .get_constructor(&self.scope, constructor_key)
+                            .get_value_from_scope(&self.scope, constructor_key)
+                            .unwrap()
+                            .get_constructor_template()
                             .unwrap();
                         let tag = constructor.get_tag();
                         let adt = self
@@ -49,15 +51,17 @@ impl<'ctx> CodeGen<'ctx> {
                             .unwrap()
                             .get_adt()
                             .unwrap();
+                        let ty = adt.type_llvm.clone();
                         let tag_value: inkwell::values::IntValue<'_> =
                             i32_type.const_int(tag, false);
 
                         let undef = adt.type_llvm.get_undef();
                         //if the argument is an int store it with a pointer
+                        println!("{}", arg);
                         let payload_ptr =
                             match self.scopes.get_value_from_scope(&self.scope, &arg).unwrap() {
                                 symbol_types::SymTableEntry::Prim(PrimPtrs::Basic(_)) => {
-                                    let arg_payload = *self.get_int(arg).unwrap();
+                                    let arg_payload = self.get_int(arg);
                                     let alloca =
                                         self.builder.build_alloca(i32_type, "lit_payload").unwrap();
                                     let _ = self.builder.build_store(alloca, arg_payload);
@@ -71,7 +75,7 @@ impl<'ctx> CodeGen<'ctx> {
                                         .unwrap()
                                         .struct_value;
                                     let alloca =
-                                        self.builder.build_alloca(i32_type, "lit_payload").unwrap();
+                                        self.builder.build_alloca(ty, "lit_payload").unwrap();
                                     let _ = self.builder.build_store(alloca, arg_payload);
                                     self.builder
                                         .build_bit_cast(alloca, i8_ptr_type, "payload_cast")
@@ -180,12 +184,15 @@ impl<'ctx> CodeGen<'ctx> {
                         id.clone(),
                         union_number,
                     );
-                    self.scopes
-                        .register_constructor(&self.scope, name.clone(), cons);
+                    self.scopes.add_symbol_to_scope(
+                        &self.scope,
+                        name.clone(),
+                        symbol_types::SymTableEntry::adt_constructor_template_to_entry(cons),
+                    );
                     constr_name_list.push(name);
                 }
 
-                let new_adt = ADT::new(id.clone(), patterns, new_type, constr_name_list);
+                let new_adt = ADT::new(patterns, new_type, constr_name_list);
                 self.scopes.add_symbol_to_scope(
                     &self.scope,
                     id.clone(),
@@ -245,7 +252,9 @@ impl<'ctx> CodeGen<'ctx> {
                     let constructor_key = ast.utf8_text(self.source_code).unwrap();
                     let constructor = self
                         .scopes
-                        .get_constructor(&self.scope, constructor_key)
+                        .get_value_from_scope(&self.scope, constructor_key)
+                        .unwrap()
+                        .get_constructor_template()
                         .unwrap();
                     let tag = constructor.get_tag();
                     let adt = self

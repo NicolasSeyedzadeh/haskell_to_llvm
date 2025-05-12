@@ -1,7 +1,6 @@
 use crate::code_gen_def::symbol_types;
 use crate::code_gen_def::CodeGen;
 use inkwell::values::BasicValueEnum;
-use inkwell::values::IntValue;
 use std::rc::Rc;
 
 use super::data_constructors;
@@ -21,28 +20,6 @@ impl FunctionBehaviour {
 }
 
 impl<'ctx> CodeGen<'ctx> {
-    pub fn get_int_or_constructor_tag(
-        &mut self,
-        switch: &str,
-        default: IntValue<'ctx>,
-        constructor: &mut bool,
-    ) -> IntValue<'ctx> {
-        match self.get_and_eval_indirect(switch) {
-            SymTableEntry::Prim(symbol_types::PrimPtrs::Basic(
-                inkwell::values::BasicValueEnum::IntValue(int),
-            )) => default,
-
-            //TODO: move payload to scope depending on tag
-            SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(constr)) => {
-                *constructor = true;
-                self.builder
-                    .build_extract_value(constr.struct_value, 0, "tag")
-                    .unwrap()
-                    .into_int_value()
-            }
-            _ => panic!("Argument passed not supported"),
-        }
-    }
     pub fn position_at_start(&mut self, block: inkwell::basic_block::BasicBlock) {
         match block.get_last_instruction() {
             None => self.builder.position_at_end(block),
@@ -80,9 +57,9 @@ impl<'ctx> CodeGen<'ctx> {
         //must be int if type checked
         self.get_and_evaluate_from_scope(&left);
         self.get_and_evaluate_from_scope(&right);
-        let lhs = *self.get_int(left).unwrap();
+        let lhs = self.get_int(left);
 
-        let rhs = *self.get_int(right).unwrap();
+        let rhs = self.get_int(right);
 
         let next = self.sym_counter.increment();
         let name = format!("add_result{}", next);
@@ -102,9 +79,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.get_and_evaluate_from_scope(&left);
         self.get_and_evaluate_from_scope(&right);
 
-        let lhs = *self.get_int(left).unwrap();
+        let lhs = self.get_int(left);
 
-        let rhs = *self.get_int(right).unwrap();
+        let rhs = self.get_int(right);
 
         let next = self.sym_counter.increment();
         let name = format!("sub_result{}", next);
@@ -124,9 +101,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.get_and_evaluate_from_scope(&left);
         self.get_and_evaluate_from_scope(&right);
 
-        let lhs = *self.get_int(left).unwrap();
+        let lhs = self.get_int(left);
 
-        let rhs = *self.get_int(right).unwrap();
+        let rhs = self.get_int(right);
 
         let next = self.sym_counter.increment();
         let name = format!("mul_result{}", next);
@@ -140,12 +117,32 @@ impl<'ctx> CodeGen<'ctx> {
         );
         name
     }
+    fn div(&mut self, left: String, right: String) -> String {
+        //must be int if type checked
+
+        self.get_and_evaluate_from_scope(&left);
+        self.get_and_evaluate_from_scope(&right);
+        let lhs = self.get_int(left);
+        let rhs = self.get_int(right);
+        let next = self.sym_counter.increment();
+        let name = format!("div_result{}", next);
+
+        let intval = self.builder.build_int_signed_div(lhs, rhs, &name).unwrap();
+
+        self.scopes.add_symbol_to_scope(
+            &self.scope,
+            name.clone(),
+            symbol_types::SymTableEntry::int_to_entry(intval),
+        );
+        name
+    }
     pub fn infix_behaviour(&mut self, op: &str, left: String, right: String) -> String {
         match op {
             "+" => self.plus(left, right),
             "-" => self.minus(left, right),
             "*" => self.mult(left, right),
-            _ => panic!("operand not known"),
+            "/" => self.div(left, right),
+            _ => panic!("operand {} not known", op),
         }
     }
     fn defined_behaviour(&mut self, func_name: &str, arg: Rc<tree_sitter::Node<'ctx>>) -> String {
@@ -234,7 +231,7 @@ impl<'ctx> CodeGen<'ctx> {
             .i32_type()
             .fn_type(&[self.context.i8_type().ptr_type(0.into()).into()], true);
         let printf = self.module.add_function("printf", printf_type, None);
-        let zero = *self.get_int("zero".to_string()).unwrap();
+        let zero = self.get_int("zero".to_string());
 
         // Get the arg pointer from the symbol table
         self.get_and_evaluate_from_scope(arg);
@@ -377,10 +374,29 @@ impl<'ctx> CodeGen<'ctx> {
                 } else if switching.grammar_name() == "name" {
                     arm_value = self
                         .scopes
-                        .get_constructor(
+                        .get_value_from_scope(
                             &self.scope,
                             switching.utf8_text(self.source_code).unwrap(),
                         )
+                        .unwrap()
+                        .get_constructor_template()
+                        .unwrap()
+                        .get_tag();
+                } else if switching.grammar_name() == "parens" {
+                    arm_value = self
+                        .scopes
+                        .get_value_from_scope(
+                            &self.scope,
+                            switching
+                                .child_by_field_name("pattern")
+                                .unwrap()
+                                .child_by_field_name("function")
+                                .unwrap()
+                                .utf8_text(self.source_code)
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .get_constructor_template()
                         .unwrap()
                         .get_tag();
                 } else {
@@ -407,13 +423,9 @@ impl<'ctx> CodeGen<'ctx> {
         func_name
     }
 
-    pub fn get_int(&mut self, name: String) -> Result<&inkwell::values::IntValue<'ctx>, String> {
+    pub fn get_int(&mut self, name: String) -> inkwell::values::IntValue<'ctx> {
         self.get_and_evaluate_from_scope(&name);
-        let int = match self
-            .scopes
-            .get_value_from_scope(&self.scope, &name)
-            .unwrap()
-        {
+        let int = match self.get_and_eval_indirect(&name) {
             symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Basic(
                 inkwell::values::BasicValueEnum::IntValue(_),
             )) => "true",
@@ -422,15 +434,11 @@ impl<'ctx> CodeGen<'ctx> {
             _ => panic!("expected integer or pointer"),
         };
         if int == "true" {
-            match self
-                .scopes
-                .get_value_from_scope(&self.scope, &name)
-                .unwrap()
-            {
+            match self.get_and_eval_indirect(&name) {
                 symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Basic(
                     inkwell::values::BasicValueEnum::IntValue(int_ptr),
-                )) => Ok(int_ptr),
-                _ => Err("Expected integer".to_string()),
+                )) => *int_ptr,
+                _ => panic!("Expected integer"),
             }
         } else if int == "false" {
             let recieved_ptr = self
@@ -467,12 +475,12 @@ impl<'ctx> CodeGen<'ctx> {
                     {
                         symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Basic(
                             inkwell::values::BasicValueEnum::IntValue(intptr),
-                        )) => Ok(intptr),
+                        )) => *intptr,
                         _ => panic!("This should never be seen"),
                     }
                 }
 
-                _ => panic!("expected integer"),
+                _ => panic!("Expected integer"),
             }
         }
         //We are an indirect item
@@ -485,25 +493,17 @@ impl<'ctx> CodeGen<'ctx> {
         name: String,
         expected_type_key: String,
     ) -> Result<&data_constructors::ConstructorLiteral<'ctx>, String> {
-        let constr = match self
-            .scopes
-            .get_value_from_scope(&self.scope, &name)
-            .unwrap()
-        {
+        let constr = match self.get_and_eval_indirect(&name) {
             symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(_)) => true,
             symbol_types::SymTableEntry::Pointer(_) => false,
             _ => panic!("Expected ADT"),
         };
         if constr {
-            match self
-                .scopes
-                .get_value_from_scope(&self.scope, &name)
-                .unwrap()
-            {
+            match self.get_and_eval_indirect(&name) {
                 symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(con)) => {
                     Ok(con)
                 }
-                _ => Err("Expected Int".to_string()),
+                _ => panic!("Expected Int"),
             }
         } else {
             let recieved_ptr = self
@@ -555,7 +555,7 @@ impl<'ctx> CodeGen<'ctx> {
                         _ => panic!("This should never be seen"),
                     }
                 }
-                _ => Err("Expected ptr".to_string()),
+                _ => panic!("Expected ptr"),
             }
         }
     }
@@ -563,9 +563,9 @@ impl<'ctx> CodeGen<'ctx> {
         &self,
         name: &str,
     ) -> Result<&data_constructors::ConstructorLiteral<'ctx>, String> {
-        match self.scopes.get_value_from_scope(&self.scope, name).unwrap() {
+        match self.get_and_eval_indirect(name) {
             symbol_types::SymTableEntry::Prim(symbol_types::PrimPtrs::Constructor(con)) => Ok(con),
-            _ => Err("expected constructor".to_string()),
+            _ => panic!("expected constructor"),
         }
     }
 }

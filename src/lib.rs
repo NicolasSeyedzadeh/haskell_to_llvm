@@ -8,23 +8,24 @@ mod code_gen_def;
 //mod types;
 
 pub fn compile(source_path: &str, destination: &str) {
-    println!("{}", source_path);
+    //read source code
     let source_code = &fs::read_to_string(source_path).unwrap();
-
-    //types::get_types(source_path);
-    Target::initialize_native(&InitializationConfig::default())
-        .expect("Failed to initialize native target");
-
-    let triple: &str = "";
     let ast = parse_to_ast(source_code);
+
     //haskell declarations always the root with no additional information
     let code_ast = ast.root_node().child(0).unwrap();
     let code_ast_split_on_line: Vec<tree_sitter::Node> =
         code_gen_def::symbol_types::tree_to_children(code_ast);
 
+    //inkwell objects for genereating IR
     let context = Context::create();
     let module = context.create_module("my_module");
 
+    //get target machine for module data layout
+    Target::initialize_native(&InitializationConfig::default())
+        .expect("Failed to initialize native target");
+
+    let triple: &str = "";
     let target_triple = if triple.is_empty() {
         TargetMachine::get_default_triple()
     } else {
@@ -43,17 +44,17 @@ pub fn compile(source_path: &str, destination: &str) {
         .expect("error ");
     module.set_data_layout(&(target_machine.get_target_data()).get_data_layout());
 
+    //More inkwell setup
     let i32_type = context.i32_type();
     let fn_type = i32_type.fn_type(&[], false);
     let function = module.add_function("main", fn_type, None);
-
     let basic_block: inkwell::basic_block::BasicBlock<'_> =
         context.append_basic_block(function, "entry");
     let return_value = i32_type.const_int(0, false);
-
     let builder = context.create_builder();
     builder.position_at_end(basic_block);
 
+    //our code generator object does the work on the AST given all the Inkwell setup
     let code_generator = &mut code_gen_def::CodeGen::new(
         &context,
         module,
@@ -64,12 +65,10 @@ pub fn compile(source_path: &str, destination: &str) {
     );
     for expression in code_ast_split_on_line.iter() {
         println!("compiling: {}\n", expression);
-        println!("{}", code_generator.recursive_compile(expression,));
+        code_generator.recursive_compile(expression);
     }
 
     let _ = code_generator.builder.build_return(Some(&return_value));
-    //code_generator.module.print_to_stderr();
-
     code_generator
         .module
         .print_to_file(destination)
@@ -84,22 +83,3 @@ fn parse_to_ast(source_code: &str) -> Tree {
 
     parser.parse(source_code, None).unwrap()
 }
-
-//Tree sitter haskell notes:
-//(bind name: (variable) match: (match expression: (apply function: (variable) argument: (literal (string)))))
-
-//            |bind|
-//           /      \
-//    name  /        \ match
-//         /          \
-//      |var|        |match|
-//                      \
-//                       \ express
-//                        \
-//                       |apply|
-//                      /       \
-//                  function    argument
-
-//we need a symbol table that associates each variable with a global pointer to the code object, the
-//type and the ast with its code generated in it and we pass around the global pointers, this allows
-//us to return pointers to values of variable from vars and pointers to literals from literals.

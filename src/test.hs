@@ -1,5 +1,6 @@
-add x y = x+y
-arg1 = add 0 0
-arg2 = add 0 0
+data MaybeNew x  = None | Some x
 
-main = print (add arg1 arg2)
+ifNone None = 0
+ifNone (Some x) = x
+
+main= print (ifNone (None))

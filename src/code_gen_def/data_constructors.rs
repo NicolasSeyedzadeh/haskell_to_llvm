@@ -1,10 +1,9 @@
-use inkwell::values::StructValue;
+use inkwell::{types::StructType, values::StructValue};
 
 use super::CodeGen;
 
 #[derive(Clone, Debug)]
 pub struct ADT<'a> {
-    name: String,
     pub fields: Vec<String>,
     pub type_llvm: inkwell::types::StructType<'a>,
     pub constructor_names: Vec<String>,
@@ -24,13 +23,11 @@ pub struct ConstructorLiteral<'a> {
 
 impl<'a> ADT<'a> {
     pub fn new(
-        name: String,
         fields: Vec<String>,
         type_llvm: inkwell::types::StructType<'a>,
         constructor_names: Vec<String>,
     ) -> Self {
         ADT {
-            name,
             fields,
             type_llvm,
             constructor_names,
@@ -84,5 +81,24 @@ impl<'a> ConstructorLiteral<'a> {
             struct_value,
             template_key,
         }
+    }
+    pub fn get_struct_type<'b>(&self, code_generator: &CodeGen<'b>) -> StructType<'b> {
+        code_generator
+            .scopes
+            .get_value_from_scope(
+                &code_generator.scope,
+                &code_generator
+                    .scopes
+                    .get_value_from_scope(&code_generator.scope, &self.template_key)
+                    .unwrap()
+                    .get_constructor_template()
+                    .unwrap()
+                    .type_loc,
+            )
+            .unwrap()
+            .get_adt()
+            .unwrap()
+            .type_llvm
+            .into()
     }
 }

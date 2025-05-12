@@ -1,8 +1,17 @@
+use inkwell::basic_block::BasicBlock;
+use inkwell::types::BasicType;
+use inkwell::types::BasicTypeEnum;
+use inkwell::values::BasicValue;
+use inkwell::values::BasicValueEnum;
 use inkwell::values::IntValue;
+use inkwell::values::PhiValue;
 use inkwell::values::PointerValue;
+use inkwell::values::StructValue;
 
 use super::class;
 use super::class::GeneralisedClosure;
+use super::data_constructors;
+use super::data_constructors::Constructor;
 use super::data_constructors::ConstructorLiteral;
 use super::data_constructors::ADT;
 use super::scoping;
@@ -52,6 +61,11 @@ impl<'a> JumpPoint<'a> {
         self.switches.push(switch_point);
         self.possible_asts.push(closure);
     }
+}
+#[derive(Clone, Debug)]
+pub enum Argument<'a> {
+    Int(IntValue<'a>),
+    Const(StructValue<'a>),
 }
 #[derive(Clone, Debug)]
 pub struct Closure<'a> {
@@ -255,29 +269,74 @@ impl<'a> Closure<'a> {
             );
 
             //flag for looking into tag
-            let mut constructor = false;
+
+            let (tc, switch_type, constructor) = match code_generator
+                .scopes
+                .get_value_from_scope(&self.scope, &this_closure_switch_key.clone().unwrap())
+                .unwrap()
+            {
+                SymTableEntry::Prim(PrimPtrs::Constructor(constr)) => (
+                    constr.template_key.clone(),
+                    constr
+                        .get_struct_type(code_generator)
+                        .as_basic_type_enum()
+                        .clone(),
+                    true,
+                ),
+                _ => (
+                    "".to_string(),
+                    code_generator
+                        .context
+                        .i32_type()
+                        .as_basic_type_enum()
+                        .clone(),
+                    false,
+                ),
+            };
 
             //will hold all entry_block phis, can be none if
             let mut phis = vec![];
-            let mut entry_start = vec![];
+            let mut entry_start: Vec<Argument<'_>> = vec![];
             match self.rec_check(&self.derivative, code_generator.source_code) {
                 true => {
                     for name in &patterns[..patterns.len() - 1] {
                         let phi_name =
                             &format!("phi_{}_{}", name, code_generator.sym_counter.increment());
 
+                        let pattern_type: BasicTypeEnum;
+
+                        code_generator.get_and_evaluate_from_scope(name);
+                        match code_generator.get_and_eval_indirect(name) {
+                            SymTableEntry::Prim(prim) => {
+                                match prim {
+                                    PrimPtrs::Basic(_) => {
+                                        pattern_type =
+                                            code_generator.context.i32_type().as_basic_type_enum()
+                                    }
+                                    PrimPtrs::Constructor(cons) => {
+                                        pattern_type = cons
+                                            .get_struct_type(code_generator)
+                                            .as_basic_type_enum()
+                                            .clone()
+                                    }
+                                    _ => panic!("Did not expect string as pattern"),
+                                }
+
+                                entry_start.push(prim.to_argument())
+                            }
+                            _ => panic!("entry to struct must be int or constructor"),
+                        }
+
                         let phi = code_generator
                             .builder
-                            .build_phi(code_generator.context.i32_type(), phi_name)
+                            .build_phi(pattern_type, phi_name)
                             .unwrap();
 
                         code_generator.scopes.add_symbol_to_scope(
                             &code_generator.scope,
                             phi_name.to_string(),
-                            SymTableEntry::int_to_entry(phi.as_basic_value().into_int_value()),
+                            SymTableEntry::delegate_phi(pattern_type, phi, tc.clone()),
                         );
-
-                        entry_start.push(*code_generator.get_int(name.to_string()).unwrap());
 
                         code_generator.scopes.add_symbol_to_scope(
                             &code_generator.scope,
@@ -292,16 +351,24 @@ impl<'a> Closure<'a> {
 
                     let phi = code_generator
                         .builder
-                        .build_phi(code_generator.context.i32_type(), phi_name)
+                        .build_phi(switch_type, phi_name)
                         .unwrap();
 
                     code_generator.scopes.add_symbol_to_scope(
                         &code_generator.scope,
                         phi_name.to_string(),
-                        SymTableEntry::int_to_entry(phi.as_basic_value().into_int_value()),
+                        SymTableEntry::delegate_phi(switch_type, phi, tc.clone()),
                     );
+                    code_generator.get_and_evaluate_from_scope(name);
 
-                    entry_start.push(*code_generator.get_int(name.to_string()).unwrap());
+                    match code_generator
+                        .scopes
+                        .get_value_from_scope(&code_generator.scope, name)
+                        .unwrap()
+                    {
+                        SymTableEntry::Prim(prim) => entry_start.push(prim.to_argument()),
+                        _ => panic!("entry to struct must be int or constructor"),
+                    }
 
                     code_generator.scopes.add_symbol_to_scope(
                         &code_generator.scope,
@@ -317,6 +384,7 @@ impl<'a> Closure<'a> {
             //get value to switch on:
             // - value itself if switch key is int
             // - tag section of the struct if constructor
+
             let arg_to_switch = match code_generator
                 .scopes
                 .get_value_from_scope(&self.scope, &this_closure_switch_key.clone().unwrap())
@@ -330,14 +398,18 @@ impl<'a> Closure<'a> {
                 },
 
                 //TODO: move payload to scope depending on tag
-                SymTableEntry::Prim(PrimPtrs::Constructor(constr)) => {
-                    constructor = true;
-                    &code_generator
-                        .builder
-                        .build_extract_value(constr.struct_value, 0, "tag")
-                        .unwrap()
-                        .into_int_value()
-                }
+                SymTableEntry::Prim(PrimPtrs::Constructor(constr)) => &code_generator
+                    .builder
+                    .build_extract_value(
+                        match phis.last() {
+                            None => constr.struct_value,
+                            Some(phi) => phi.as_basic_value().into_struct_value(),
+                        },
+                        0,
+                        "tag",
+                    )
+                    .unwrap()
+                    .into_int_value(),
                 _ => panic!("Argument passed not supported"),
             };
             //create switch LLVM IR
@@ -357,7 +429,6 @@ impl<'a> Closure<'a> {
             let def = self.default_closure.as_ref();
             let first_pattern = parse_arg(*def.next_pattern(), code_generator);
             match def {
-                //if we are trying to compile from a returned closure
                 ClosureUnion::Closure(clos) => {
                     //for each jump point execute it
                     for (subclosure, new_block) in zip(&jump_point.possible_asts, &basic_block_list)
@@ -390,29 +461,24 @@ impl<'a> Closure<'a> {
                         key_to_pass,
                     ));
                 }
-                //if we are trying to compile from a collected closure
                 ClosureUnion::ClosureAux(clos) => {
                     //for each jump point execute it
-                    for ((subclosure, new_block), switch) in zip(
-                        zip(&jump_point.possible_asts, &basic_block_list),
-                        &self.jump_points.as_ref().unwrap().switches,
-                    ) {
+                    for (subclosure, new_block) in zip(&jump_point.possible_asts, &basic_block_list)
+                    {
                         code_generator.builder.position_at_end(*new_block);
                         code_generator.basic_block = *new_block;
 
                         self.rebind_match_key(
                             constructor,
-                            switch,
                             code_generator,
                             &this_closure_switch_key,
                             first_pattern.clone(),
                         );
-                        let new_scope = code_generator.scopes.new_scope(Some(self.scope));
 
                         result_names_and_blocks.push(match subclosure {
                             ClosureUnion::Closure(subclosure) => subclosure.execute_ast(
                                 code_generator,
-                                new_scope,
+                                code_generator.scope,
                                 key_to_pass.clone(),
                             ),
                             ClosureUnion::ClosureAux(subclosure) => (
@@ -428,12 +494,10 @@ impl<'a> Closure<'a> {
 
                         self.rebind_match_key(
                             constructor,
-                            switch,
                             code_generator,
                             &this_closure_switch_key,
                             first_pattern.clone(),
                         );
-
                         result_names_and_blocks
                             .push((code_generator.recursive_compile(&clos.ast), default_block));
                     }
@@ -447,7 +511,6 @@ impl<'a> Closure<'a> {
             basic_block_list.push(default_block);
 
             code_generator.get_and_evaluate_from_scope(&result_names_and_blocks[0].0);
-            // if this gets set then we want to switch on this phi val instead
             //get the first return type (Can't be recursive because it needs a base case)
             match code_generator.get_and_eval_indirect(&result_names_and_blocks[0].0) {
                 //if the return type is an integer then we build phi to take back return type and
@@ -504,10 +567,13 @@ impl<'a> Closure<'a> {
                                             entry_vals.push(vec![(start, &previous_block)]);
                                         }
                                         code_generator.get_and_evaluate_from_scope(&key);
-                                        entry_vals.push(vec![(
-                                            *code_generator.get_int(key.to_string()).unwrap(),
-                                            &previous_block,
-                                        )]);
+
+                                        match code_generator.get_and_eval_indirect(key) {
+                                            SymTableEntry::Prim(prim) => entry_vals
+                                                .push(vec![(prim.to_argument(), &previous_block)]),
+
+                                            _ => panic!("recursive return should be primitive "),
+                                        }
                                     }
                                 };
 
@@ -529,13 +595,40 @@ impl<'a> Closure<'a> {
                                                 zip(entry_vals.iter_mut(), patterns.clone())
                                             {
                                                 code_generator.scope = scope;
+                                                match code_generator.get_and_eval_indirect(&pattern)
+                                                {
+                                                    SymTableEntry::Prim(prim) => {
+                                                        phi_vec.push((prim.to_argument(), y))
+                                                    }
+                                                    //if we got a payload as a argument it must have
+                                                    //the same type as the args ADT, cast to struct
+                                                    SymTableEntry::Pointer(payload) => {
+                                                        code_generator.builder.position_before(
+                                                            &y.get_terminator().unwrap(),
+                                                        );
+                                                        let casted_payload = code_generator
+                                                            .builder
+                                                            .build_pointer_cast(
+                                                                *payload,
+                                                                switch_type.ptr_type(0.into()),
+                                                                "cast_to_struct",
+                                                            )
+                                                            .unwrap();
+                                                        let payload_as_struct = code_generator
+                                                            .builder
+                                                            .build_load(casted_payload, "payload")
+                                                            .unwrap()
+                                                            .into_struct_value();
+                                                        phi_vec.push((
+                                                            Argument::Const(payload_as_struct),
+                                                            y,
+                                                        ))
+                                                    }
 
-                                                phi_vec.push((
-                                                    *code_generator
-                                                        .get_int(pattern.clone())
-                                                        .unwrap(),
-                                                    y,
-                                                ))
+                                                    _ => panic!(
+                                                        "recursive return should be primitive "
+                                                    ),
+                                                }
                                             }
                                         }
                                     }
@@ -543,25 +636,43 @@ impl<'a> Closure<'a> {
                                 code_generator.scope = new_scope;
                                 code_generator.position_at_start(entry_block);
 
-                                let phi_inputs: Vec<
-                                    Vec<(
-                                        &dyn inkwell::values::BasicValue<'_>,
-                                        inkwell::basic_block::BasicBlock<'_>,
-                                    )>,
-                                > = entry_vals
+                                let basic_values: Vec<_> = entry_vals
                                     .iter()
                                     .map(|phi_input| {
                                         phi_input
                                             .iter()
                                             .map(|(x, y)| {
-                                                (x as &dyn inkwell::values::BasicValue<'_>, **y)
+                                                (
+                                                    match x {
+                                                        Argument::Int(int) => {
+                                                            int.as_basic_value_enum()
+                                                        }
+                                                        Argument::Const(cons) => {
+                                                            cons.as_basic_value_enum()
+                                                        }
+                                                    },
+                                                    **y,
+                                                )
                                             })
-                                            .collect::<Vec<(
-                                                &dyn inkwell::values::BasicValue<'_>,
-                                                inkwell::basic_block::BasicBlock<'_>,
-                                            )>>()
+                                            .collect()
                                     })
                                     .collect();
+
+                                let phi_inputs: Vec<Vec<(&dyn BasicValue<'_>, BasicBlock<'_>)>> =
+                                    basic_values
+                                        .iter()
+                                        .map(
+                                            |inner_vec: &Vec<(
+                                                BasicValueEnum<'a>,
+                                                BasicBlock<'a>,
+                                            )>| {
+                                                inner_vec
+                                                    .iter()
+                                                    .map(|(x, y)| (x as &dyn BasicValue<'_>, *y))
+                                                    .collect()
+                                            },
+                                        )
+                                        .collect();
 
                                 for (phi_input, phi) in zip(phi_inputs, phis) {
                                     phi.add_incoming(&phi_input);
@@ -729,7 +840,6 @@ impl<'a> Closure<'a> {
     //Build and add to scope values based on the branch
     fn unwrap_field(
         &self,
-        switch: u64,
         constr_key: String,
         code_generator: &mut CodeGen<'a>,
         template_name: String,
@@ -737,7 +847,9 @@ impl<'a> Closure<'a> {
         //We get the argument literal, then get the ADT, then get the template at the branch we are at
         let constr_template = code_generator
             .scopes
-            .get_constructor(&self.scope, &template_name)
+            .get_value_from_scope(&self.scope, &template_name)
+            .unwrap()
+            .get_constructor_template()
             .unwrap();
 
         let adt_name = constr_template.type_loc.clone();
@@ -754,12 +866,10 @@ impl<'a> Closure<'a> {
 
         let branch_template = code_generator
             .scopes
-            .get_constructor(
-                &code_generator.scope,
-                &adt.constructor_names[switch as usize],
-            )
+            .get_value_from_scope(&code_generator.scope, &template_name)
+            .unwrap()
+            .get_constructor_template()
             .unwrap();
-
         let mut entries_to_add: Vec<(String, SymTableEntry)> = vec![];
         for (index, field) in adt.fields.iter().enumerate() {
             if branch_template.fields.iter().any(|x| x == field) {
@@ -782,14 +892,13 @@ impl<'a> Closure<'a> {
         for (key, entry) in entries_to_add {
             code_generator
                 .scopes
-                .add_symbol_to_scope(&self.scope, key, entry);
+                .add_symbol_to_scope(&code_generator.scope, key, entry);
         }
     }
     fn rec_check(&self, derivative: &str, sc: &[u8]) -> bool {
         Closure::rec_check_wrapped(&*self.get_ast(), derivative, sc)
     }
     fn rec_check_wrapped(ast: &tree_sitter::Node<'_>, derivative: &str, sc: &[u8]) -> bool {
-        println!("{}", ast.utf8_text(sc).unwrap());
         match ast.grammar_name() {
             "function" => Closure::rec_check_wrapped(
                 &ast.child_by_field_name("name").unwrap(),
@@ -836,7 +945,6 @@ impl<'a> Closure<'a> {
     fn rebind_match_key(
         &self,
         constructor: bool,
-        switch: &u64,
         code_generator: &mut CodeGen<'a>,
         this_closure_switch_key: &Option<String>,
         template_name: String,
@@ -844,7 +952,6 @@ impl<'a> Closure<'a> {
         //if its a constructor, unwrap the struct and add fields to scope
         if constructor {
             self.unwrap_field(
-                *switch,
                 this_closure_switch_key.clone().unwrap(),
                 code_generator,
                 template_name,
@@ -870,7 +977,6 @@ impl<'a> Closure<'a> {
         code_generator.builder.position_at_end(*block);
 
         //peak at result, if its a rec_call then build back to entry
-
         match code_generator
             .scopes
             .get_value_from_scope(&code_generator.scope, &result_name)
@@ -885,12 +991,12 @@ impl<'a> Closure<'a> {
                 Err(*scope)
             }
             _ => {
+                let return_val = code_generator.get_int(result_name);
                 code_generator
                     .builder
                     .build_unconditional_branch(*merge_block)
                     .expect("unconditional branch build failed");
-
-                Ok(*code_generator.get_int(result_name).unwrap())
+                Ok(return_val)
             }
         }
     }
@@ -920,11 +1026,23 @@ pub enum PrimPtrs<'a> {
     Global(inkwell::values::GlobalValue<'a>),
     Constructor(ConstructorLiteral<'a>),
 }
+impl<'a> PrimPtrs<'a> {
+    pub fn to_argument(&self) -> Argument<'a> {
+        match self {
+            PrimPtrs::Basic(basic) => Argument::Int(basic.into_int_value()),
+            PrimPtrs::Constructor(cons) => Argument::Const(cons.struct_value),
+            _ => panic!("Argument should be "),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum SymTableEntry<'a> {
     Clos(Closure<'a>),
     AdtDef(ADT<'a>),
     GenClos(class::GeneralisedClosure),
+    Constructor_Template(data_constructors::Constructor),
+
     Prim(PrimPtrs<'a>),
     Ast(Rc<tree_sitter::Node<'a>>),
     Pointer(PointerValue<'a>),
@@ -964,6 +1082,12 @@ impl<'a> SymTableEntry<'a> {
             _ => Err("Expected ADT".to_string()),
         }
     }
+    pub fn get_constructor_template(&self) -> Result<&Constructor, String> {
+        match self {
+            SymTableEntry::Constructor_Template(cons) => Ok(cons),
+            _ => Err("Expected Constructor Template".to_string()),
+        }
+    }
 
     pub fn get_closure(&self) -> Result<&Closure<'a>, String> {
         match self {
@@ -977,7 +1101,7 @@ impl<'a> SymTableEntry<'a> {
             _ => Err("Expected closure".to_string()),
         }
     }
-    pub fn get_generalised_closure(&self) -> Result<&GeneralisedClosure, String> {
+    pub fn _get_generalised_closure(&self) -> Result<&GeneralisedClosure, String> {
         match self {
             SymTableEntry::GenClos(closure) => Ok(closure),
             _ => Err("Expected closure".to_string()),
@@ -1007,6 +1131,24 @@ impl<'a> SymTableEntry<'a> {
     }
     pub fn adt_constructor_to_entry(constructor: ConstructorLiteral<'a>) -> Self {
         SymTableEntry::Prim(PrimPtrs::Constructor(constructor))
+    }
+    pub fn adt_constructor_template_to_entry(constructor: data_constructors::Constructor) -> Self {
+        SymTableEntry::Constructor_Template(constructor)
+    }
+    pub fn delegate_phi(
+        ty: BasicTypeEnum,
+        phi: PhiValue<'a>,
+        template_key: String,
+    ) -> SymTableEntry<'a> {
+        match ty {
+            BasicTypeEnum::IntType(_) => {
+                SymTableEntry::int_to_entry(phi.as_basic_value().into_int_value())
+            }
+            BasicTypeEnum::StructType(_) => SymTableEntry::adt_constructor_to_entry(
+                ConstructorLiteral::new(phi.as_basic_value().into_struct_value(), template_key),
+            ),
+            _ => panic!("Unexpected Type"),
+        }
     }
 }
 
