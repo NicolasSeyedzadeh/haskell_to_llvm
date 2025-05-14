@@ -1,13 +1,3 @@
-use inkwell::basic_block::BasicBlock;
-use inkwell::types::BasicType;
-use inkwell::types::BasicTypeEnum;
-use inkwell::values::BasicValue;
-use inkwell::values::BasicValueEnum;
-use inkwell::values::IntValue;
-use inkwell::values::PhiValue;
-use inkwell::values::PointerValue;
-use inkwell::values::StructValue;
-
 use super::class;
 use super::class::GeneralisedClosure;
 use super::data_constructors;
@@ -18,10 +8,20 @@ use super::scoping;
 use super::scoping::ScopeId;
 use super::CodeGen;
 use core::panic;
+use inkwell::basic_block::BasicBlock;
+use inkwell::types::BasicType;
+use inkwell::types::BasicTypeEnum;
+use inkwell::values::BasicValue;
+use inkwell::values::BasicValueEnum;
+use inkwell::values::IntValue;
+use inkwell::values::PhiValue;
+use inkwell::values::PointerValue;
+use inkwell::values::StructValue;
 use std::cell::RefCell;
 use std::iter::zip;
 use std::mem;
 use std::rc::Rc;
+use std::vec;
 
 #[derive(Clone, Debug)]
 pub enum ClosureUnion<'a> {
@@ -39,6 +39,12 @@ impl<'a> ClosureUnion<'a> {
         match self {
             ClosureUnion::Closure(clos) => clos.patterns(),
             ClosureUnion::ClosureAux(clos) => &clos.patterns,
+        }
+    }
+    pub fn last_pattern(&self) -> Rc<tree_sitter::Node<'_>> {
+        match self {
+            ClosureUnion::Closure(clos) => clos.last_pattern(),
+            ClosureUnion::ClosureAux(clos) => clos.patterns.last().unwrap().clone(),
         }
     }
 }
@@ -188,6 +194,8 @@ impl<'a> Closure<'a> {
             .collect();
         //the value of the item supposed to come from the previous block.
         if *parent_closure.currently_executing.borrow() {
+            //TODO: if we have a struct unwrap here then convert it to the right type instead of
+            //jumping back in the pointer bit
             let name = format!("recursive call {}", code_generator.sym_counter.increment());
             for pattern in &patterns {
                 code_generator.get_and_evaluate_from_scope(pattern);
@@ -272,11 +280,14 @@ impl<'a> Closure<'a> {
 
             let (tc, switch_type, constructor) = match code_generator
                 .scopes
-                .get_value_from_scope(&self.scope, &this_closure_switch_key.clone().unwrap())
+                .get_value_from_scope(
+                    &code_generator.scope,
+                    &this_closure_switch_key.clone().unwrap(),
+                )
                 .unwrap()
             {
                 SymTableEntry::Prim(PrimPtrs::Constructor(constr)) => (
-                    constr.template_key.clone(),
+                    constr.adt_key.clone(),
                     constr.get_struct_type(code_generator).as_basic_type_enum(),
                     true,
                 ),
@@ -369,17 +380,18 @@ impl<'a> Closure<'a> {
                     );
                     phis.push(phi);
                 }
-
-                false => println!("non-recursive"),
+                false => {}
             }
 
             //get value to switch on:
             // - value itself if switch key is int
             // - tag section of the struct if constructor
+            let switch_arg = this_closure_switch_key.clone().unwrap();
+            code_generator.get_and_evaluate_from_scope(&switch_arg);
 
             let arg_to_switch = match code_generator
                 .scopes
-                .get_value_from_scope(&self.scope, &this_closure_switch_key.clone().unwrap())
+                .get_value_from_scope(&code_generator.scope, &switch_arg)
                 .unwrap()
             {
                 SymTableEntry::Prim(PrimPtrs::Basic(
@@ -388,6 +400,7 @@ impl<'a> Closure<'a> {
                     None => int,
                     Some(phi) => &phi.as_basic_value().into_int_value(),
                 },
+                SymTableEntry::Pointer(_) => &code_generator.get_int(&switch_arg),
 
                 //TODO: move payload to scope depending on tag
                 SymTableEntry::Prim(PrimPtrs::Constructor(constr)) => &code_generator
@@ -402,7 +415,7 @@ impl<'a> Closure<'a> {
                     )
                     .unwrap()
                     .into_int_value(),
-                _ => panic!("Argument passed not supported"),
+                x => panic!("Argument passed not supported {:?}", x),
             };
             //create switch LLVM IR
             let _ = code_generator
@@ -418,16 +431,21 @@ impl<'a> Closure<'a> {
                 vec![];
 
             //generate code for cases
-            let def = self.default_closure.as_ref();
-            let first_pattern = parse_arg(*def.next_pattern(), code_generator);
-            match def {
+            match self.default_closure.as_ref() {
                 ClosureUnion::Closure(clos) => {
                     //for each jump point execute it
                     for (subclosure, new_block) in zip(&jump_point.possible_asts, &basic_block_list)
                     {
                         code_generator.builder.position_at_end(*new_block);
                         code_generator.basic_block = *new_block;
-                        let new_scope = code_generator.scopes.new_scope(Some(self.scope));
+
+                        self.rebind_match_key(
+                            constructor,
+                            code_generator,
+                            &this_closure_switch_key,
+                            &subclosure.last_pattern(),
+                        );
+                        let new_scope = code_generator.scopes.new_scope(Some(code_generator.scope));
 
                         result_names_and_blocks.push(match subclosure {
                             ClosureUnion::Closure(subclosure) => subclosure.execute_ast(
@@ -443,7 +461,7 @@ impl<'a> Closure<'a> {
                     }
 
                     //populate default case
-                    let new_scope = code_generator.scopes.new_scope(Some(self.scope));
+                    let new_scope = code_generator.scopes.new_scope(Some(code_generator.scope));
 
                     code_generator.builder.position_at_end(default_block);
                     code_generator.basic_block = default_block;
@@ -464,7 +482,7 @@ impl<'a> Closure<'a> {
                             constructor,
                             code_generator,
                             &this_closure_switch_key,
-                            first_pattern.clone(),
+                            &subclosure.last_pattern(),
                         );
 
                         result_names_and_blocks.push(match subclosure {
@@ -488,31 +506,32 @@ impl<'a> Closure<'a> {
                             constructor,
                             code_generator,
                             &this_closure_switch_key,
-                            first_pattern.clone(),
+                            &self.default_closure.last_pattern(),
                         );
-                        result_names_and_blocks
-                            .push((code_generator.recursive_compile(&clos.ast), default_block));
+                        println!("asdnajnda{:?}", this_closure_switch_key);
+                        code_generator
+                            .scopes
+                            ._debug_print_in_scope(&code_generator.scope);
+                        let compile_result = code_generator.recursive_compile(&clos.ast);
+
+                        result_names_and_blocks.push((compile_result, code_generator.basic_block));
                     }
                 }
             }
 
             //jump back from default to merge block
-
             code_generator.builder.position_at_end(merge_block);
             code_generator.basic_block = merge_block;
             basic_block_list.push(default_block);
 
             code_generator.get_and_evaluate_from_scope(&result_names_and_blocks[0].0);
-            //get the first return type (Can't be recursive because it needs a base case)
+            //get the first return type (Can't be recursive because it needs a base case), treat all
+            //return values that way and then build phi
             match code_generator.get_and_eval_indirect(&result_names_and_blocks[0].0) {
-                //if the return type is an integer then we build phi to take back return type and
-                //return that phi value
-                SymTableEntry::Prim(PrimPtrs::Basic(_)) => {
-                    //build phi
-
+                SymTableEntry::Prim(PrimPtrs::Basic(_)) | SymTableEntry::Pointer(_) => {
                     //get values and finish branch back.
                     let return_value_iter: Vec<(
-                        Result<IntValue<'a>, ScopeId>,
+                        Result<String, ScopeId>,
                         &inkwell::basic_block::BasicBlock<'_>,
                     )> = result_names_and_blocks
                         .iter()
@@ -530,12 +549,12 @@ impl<'a> Closure<'a> {
                         })
                         .collect();
                     //if there are no recursive calls in the block then we just get the int values.
-                    //if there are recursive calls, jump back to the entry and fall
+                    //if there are recursive calls, jump back to the entry
                     let int_values: Vec<(IntValue<'a>, &inkwell::basic_block::BasicBlock<'_>)> =
                         match return_value_iter.iter().any(|(x, _)| x.is_err()) {
                             false => return_value_iter
                                 .iter()
-                                .map(|(x, y)| (x.unwrap(), *y))
+                                .map(|(x, y)| (code_generator.get_int(&x.clone().unwrap()), *y))
                                 .collect(),
                             true => {
                                 //go to entry and execute args
@@ -579,7 +598,9 @@ impl<'a> Closure<'a> {
                                 for (x, y) in return_value_iter {
                                     match x {
                                         //if we have a return value add it to the merge phi
-                                        Ok(int) => merge_vals.push((int, y)),
+                                        Ok(int) => {
+                                            merge_vals.push((code_generator.get_int(&int), y))
+                                        }
                                         //if we don't have a merge value, for every argument build a
                                         //phi for this branch and the entry
                                         Err(scope) => {
@@ -707,16 +728,17 @@ impl<'a> Closure<'a> {
                     //Here we look at the return values that we got and jump to the merge block if
                     //we got a value or jump back to the start if we got a recursive entry
                     let int_values: Vec<inkwell::values::IntValue<'_>> =
-                        zip(branch_indexes, &basic_block_list)
-                            .map(|(x, block)| {
+                        zip(branch_indexes, &result_names_and_blocks)
+                            .map(|(x, (_, block))| {
                                 self.end_branch(
                                     code_generator,
                                     block,
                                     &merge_block,
                                     &entry_block,
-                                    x,
+                                    x.clone(),
                                 )
-                                .unwrap()
+                                .unwrap();
+                                code_generator.get_int(&x)
                             })
                             .collect();
 
@@ -729,7 +751,10 @@ impl<'a> Closure<'a> {
                         int_values
                             .iter()
                             .map(|x| x as &dyn inkwell::values::BasicValue<'_>),
-                        basic_block_list,
+                        result_names_and_blocks
+                            .iter()
+                            .map(|(_, y)| *y)
+                            .collect::<Vec<_>>(),
                     )
                     .collect();
 
@@ -783,7 +808,7 @@ impl<'a> Closure<'a> {
                     let mut new_closure = Closure::new_with_closure(
                         Some(new_jump_points),
                         new_default,
-                        code_generator.scopes.new_scope(Some(self.scope)),
+                        code_generator.scopes.new_scope(Some(code_generator.scope)),
                         der,
                     );
                     new_closure.derivative = self.derivative.clone();
@@ -791,15 +816,70 @@ impl<'a> Closure<'a> {
 
                     result_value = SymTableEntry::closure_to_entry(new_closure);
                 }
-                _ => panic!("return value not int or closure"),
+                SymTableEntry::Prim(PrimPtrs::Constructor(constr)) => {
+                    //list of return values after recursive check and jump backs.
+                    let adt_key = constr.adt_key.clone();
+                    let adt = code_generator
+                        .scopes
+                        .get_value_from_scope(&code_generator.scope, &adt_key)
+                        .unwrap()
+                        .get_adt()
+                        .unwrap();
+                    let phi = code_generator
+                        .builder
+                        .build_phi(
+                            adt.type_llvm,
+                            &format!("Result{}", code_generator.sym_counter.increment()),
+                        )
+                        .unwrap();
+                    let strict_values: Vec<(StructValue, BasicBlock)> = result_names_and_blocks
+                        .iter()
+                        .map(|(x, block)| {
+                            (
+                                {
+                                    let litname = self
+                                        .end_branch(
+                                            code_generator,
+                                            block,
+                                            &merge_block,
+                                            &entry_block,
+                                            x.to_string(),
+                                        )
+                                        .unwrap();
+                                    code_generator
+                                        .get_constructor_literal(litname, adt_key.clone())
+                                        .unwrap()
+                                        .struct_value
+                                },
+                                *block,
+                            )
+                        })
+                        .collect();
+
+                    let phi_inputs: Vec<(&dyn inkwell::values::BasicValue<'_>, BasicBlock)> =
+                        strict_values
+                            .iter()
+                            .map(|(x, y)| (x as &dyn inkwell::values::BasicValue<'_>, *y))
+                            .collect();
+                    phi.add_incoming(&phi_inputs);
+                    result_value = SymTableEntry::adt_constructor_to_entry(ConstructorLiteral {
+                        struct_value: phi.as_basic_value().into_struct_value(),
+                        adt_key,
+                    });
+                }
+
+                x => panic!("return value not int or closure instead is {:?}", x),
             }
+            code_generator.basic_block = merge_block;
+            code_generator.builder.position_at_end(merge_block);
         }
         //no jumps, just make the default
         else {
             let result_key = match self.default_closure.as_ref() {
                 ClosureUnion::ClosureAux(clos) => code_generator.recursive_compile(&clos.ast),
                 ClosureUnion::Closure(clos) => {
-                    clos.execute_ast(code_generator, new_scope, key_to_pass).0
+                    clos.execute_ast(code_generator, code_generator.scope, key_to_pass)
+                        .0
                 }
             };
 
@@ -834,26 +914,43 @@ impl<'a> Closure<'a> {
         &self,
         constr_key: String,
         code_generator: &mut CodeGen<'a>,
-        template_name: String,
+        pattern_ast: &tree_sitter::Node,
     ) {
+        let mut current_pointer = *pattern_ast;
+        let mut args_names = vec![];
+        while current_pointer.grammar_name() != "name" {
+            match current_pointer.grammar_name() {
+                "apply" => {
+                    args_names.push(
+                        current_pointer
+                            .child_by_field_name("argument")
+                            .unwrap()
+                            .utf8_text(code_generator.source_code)
+                            .unwrap(),
+                    );
+                    current_pointer = current_pointer.child_by_field_name("function").unwrap();
+                }
+                "parens" => {
+                    current_pointer = current_pointer.child_by_field_name("pattern").unwrap();
+                }
+                _ => panic!(
+                    "unexpected matching argument {}",
+                    current_pointer.grammar_name()
+                ),
+            }
+        }
+        let template_name = current_pointer
+            .utf8_text(code_generator.source_code)
+            .unwrap();
+
+        let constr_lit = code_generator
+            .get_constructor_literal_no_pointer_check(&constr_key)
+            .unwrap();
+        let adt_name = constr_lit.adt_key.clone();
         //We get the argument literal, then get the ADT, then get the template at the branch we are at
-        let constr_template = code_generator
-            .scopes
-            .get_value_from_scope(&self.scope, &template_name)
-            .unwrap()
-            .get_constructor_template()
-            .unwrap();
 
-        let adt_name = constr_template.type_loc.clone();
         let _ = code_generator
-            .get_constructor_literal(constr_key.clone(), adt_name.clone())
-            .unwrap();
-
-        let adt = code_generator
-            .scopes
-            .get_value_from_scope(&self.scope, &adt_name)
-            .unwrap()
-            .get_adt()
+            .get_constructor_literal(constr_key.clone(), adt_name)
             .unwrap();
 
         let branch_template = code_generator
@@ -862,24 +959,24 @@ impl<'a> Closure<'a> {
             .unwrap()
             .get_constructor_template()
             .unwrap();
-        let mut entries_to_add: Vec<(String, SymTableEntry)> = vec![];
-        for (index, field) in adt.fields.iter().enumerate() {
-            if branch_template.fields.iter().any(|x| x == field) {
-                let constr_lit = code_generator
-                    .get_constructor_literal_no_pointer_check(&constr_key)
-                    .unwrap();
-                let payload_value = code_generator
-                    .builder
-                    .build_extract_value(
-                        constr_lit.struct_value,
-                        (index + 1) as u32,
-                        "extract_payload",
-                    )
-                    .unwrap()
-                    .into_pointer_value();
 
-                entries_to_add.push((field.to_string(), SymTableEntry::Pointer(payload_value)));
-            }
+        let constr_lit = code_generator
+            .get_constructor_literal_no_pointer_check(&constr_key)
+            .unwrap();
+
+        let mut entries_to_add: Vec<(String, SymTableEntry)> = vec![];
+        for (index, field) in zip(&branch_template.fields, args_names) {
+            let payload_value = code_generator
+                .builder
+                .build_extract_value(
+                    constr_lit.struct_value,
+                    (index + 1) as u32,
+                    "extract_payload",
+                )
+                .unwrap()
+                .into_pointer_value();
+
+            entries_to_add.push((field.to_string(), SymTableEntry::Pointer(payload_value)));
         }
         for (key, entry) in entries_to_add {
             code_generator
@@ -908,7 +1005,7 @@ impl<'a> Closure<'a> {
                     sc,
                 )
             }
-            "variable" => ast.utf8_text(sc).unwrap() == derivative,
+            "variable" | "name" => ast.utf8_text(sc).unwrap() == derivative,
             "literal" => false,
             "parens" => Closure::rec_check_wrapped(
                 &ast.child_by_field_name("expression").unwrap(),
@@ -939,18 +1036,22 @@ impl<'a> Closure<'a> {
         constructor: bool,
         code_generator: &mut CodeGen<'a>,
         this_closure_switch_key: &Option<String>,
-        template_name: String,
+        pattern_ast: &tree_sitter::Node,
     ) {
         //if its a constructor, unwrap the struct and add fields to scope
         if constructor {
             self.unwrap_field(
                 this_closure_switch_key.clone().unwrap(),
                 code_generator,
-                template_name,
+                pattern_ast,
             );
         }
         //else just add our last pattern to scope
         else {
+            let template_name = pattern_ast
+                .utf8_text(code_generator.source_code)
+                .unwrap()
+                .to_string();
             code_generator.scopes.add_symbol_to_scope(
                 &self.scope,
                 template_name,
@@ -965,7 +1066,7 @@ impl<'a> Closure<'a> {
         merge_block: &inkwell::basic_block::BasicBlock<'a>,
         entry: &inkwell::basic_block::BasicBlock<'a>,
         result_name: String,
-    ) -> Result<inkwell::values::IntValue<'a>, ScopeId> {
+    ) -> Result<String, ScopeId> {
         code_generator.builder.position_at_end(*block);
 
         //peak at result, if its a rec_call then build back to entry
@@ -983,12 +1084,11 @@ impl<'a> Closure<'a> {
                 Err(*scope)
             }
             _ => {
-                let return_val = code_generator.get_int(result_name);
                 code_generator
                     .builder
                     .build_unconditional_branch(*merge_block)
                     .expect("unconditional branch build failed");
-                Ok(return_val)
+                Ok(result_name)
             }
         }
     }
@@ -1076,6 +1176,12 @@ impl<'a> SymTableEntry<'a> {
     pub fn get_constructor_template(&self) -> Result<&Constructor, String> {
         match self {
             SymTableEntry::ConstructorTemplate(cons) => Ok(cons),
+            _ => Err("Expected Constructor Template".to_string()),
+        }
+    }
+    pub fn get_prim(&self) -> Result<&PrimPtrs, String> {
+        match self {
+            SymTableEntry::Prim(pr) => Ok(pr),
             _ => Err("Expected Constructor Template".to_string()),
         }
     }

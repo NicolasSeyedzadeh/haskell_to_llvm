@@ -1,6 +1,7 @@
 use inkwell::builder;
 use inkwell::context;
 use inkwell::module;
+use inkwell::values::FunctionValue;
 mod counter;
 pub mod symbol_types;
 
@@ -20,6 +21,7 @@ pub struct CodeGen<'ctx> {
     scope: scoping::ScopeId,
     sym_counter: Box<counter::Counter>,
     scopes: scoping::ScopeArena<'ctx>,
+    printf: FunctionValue<'ctx>,
 }
 impl<'ctx> CodeGen<'ctx> {
     pub fn new(
@@ -29,6 +31,7 @@ impl<'ctx> CodeGen<'ctx> {
         function: inkwell::values::FunctionValue<'ctx>,
         basic_block: inkwell::basic_block::BasicBlock<'ctx>,
         source_code: &'ctx [u8],
+        printf: FunctionValue<'ctx>,
     ) -> Self {
         let mut scopes = scoping::ScopeArena::new();
         let mut cg = CodeGen {
@@ -41,6 +44,7 @@ impl<'ctx> CodeGen<'ctx> {
             scope: scopes.new_scope(None),
             sym_counter: Box::new(counter::Counter::new()),
             scopes,
+            printf,
         };
         let zero = cg.context.i32_type().const_zero();
         cg.scopes.add_symbol_to_scope(

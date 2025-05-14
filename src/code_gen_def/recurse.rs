@@ -1,3 +1,5 @@
+use inkwell::types::BasicType;
+
 use crate::code_gen_def::class::GeneralisedClosure;
 use crate::code_gen_def::data_constructors;
 use crate::code_gen_def::data_constructors::ADT;
@@ -44,24 +46,28 @@ impl<'ctx> CodeGen<'ctx> {
                             .unwrap()
                             .get_constructor_template()
                             .unwrap();
+                        let index_to_add_payload = constructor.fields[0] + 1;
+
                         let tag = constructor.get_tag();
+
                         let adt = self
                             .scopes
                             .get_value_from_scope(&self.scope, &constructor.type_loc)
                             .unwrap()
                             .get_adt()
                             .unwrap();
+                        let adt_key = constructor.type_loc.clone();
+
                         let ty = adt.type_llvm;
                         let tag_value: inkwell::values::IntValue<'_> =
                             i32_type.const_int(tag, false);
 
                         let undef = adt.type_llvm.get_undef();
                         //if the argument is an int store it with a pointer
-                        println!("{}", arg);
                         let payload_ptr =
                             match self.scopes.get_value_from_scope(&self.scope, &arg).unwrap() {
                                 symbol_types::SymTableEntry::Prim(PrimPtrs::Basic(_)) => {
-                                    let arg_payload = self.get_int(arg);
+                                    let arg_payload = self.get_int(&arg);
                                     let alloca =
                                         self.builder.build_alloca(i32_type, "lit_payload").unwrap();
                                     let _ = self.builder.build_store(alloca, arg_payload);
@@ -71,7 +77,7 @@ impl<'ctx> CodeGen<'ctx> {
                                 }
                                 symbol_types::SymTableEntry::Prim(PrimPtrs::Constructor(_)) => {
                                     let arg_payload = self
-                                        .get_constructor_literal(arg, constructor.type_loc.clone())
+                                        .get_constructor_literal(arg, adt_key.clone())
                                         .unwrap()
                                         .struct_value;
                                     let alloca =
@@ -89,9 +95,15 @@ impl<'ctx> CodeGen<'ctx> {
                             .build_insert_value(undef, tag_value, 0, "insert_tag")
                             .unwrap()
                             .into_struct_value();
+
                         let const_struct = self
                             .builder
-                            .build_insert_value(with_tag, payload_ptr, 1, "insert_payload")
+                            .build_insert_value(
+                                with_tag,
+                                payload_ptr,
+                                index_to_add_payload as u32,
+                                "insert_payload",
+                            )
                             .unwrap()
                             .into_struct_value();
 
@@ -103,7 +115,7 @@ impl<'ctx> CodeGen<'ctx> {
                             symbol_types::SymTableEntry::adt_constructor_to_entry(
                                 data_constructors::ConstructorLiteral::new(
                                     const_struct,
-                                    constructor_key.to_string(),
+                                    adt_key.clone(),
                                 ),
                             ),
                         );
@@ -166,10 +178,14 @@ impl<'ctx> CodeGen<'ctx> {
                 //placeholder type for possible data payloads
                 let new_ptr_type = self.context.i8_type().ptr_type(0.into());
 
+                //StructType of the form {i32, (i8* x pattern count)}
+                let mut struct_type = vec![i32_type.as_basic_type_enum()];
+                for _ in 0..patterns.len() {
+                    struct_type.push(new_ptr_type.into());
+                }
+
                 // make new type, tag to decide which constructor it is
-                let new_type = self
-                    .context
-                    .struct_type(&[i32_type.into(), new_ptr_type.into()], false);
+                let new_type = self.context.struct_type(&struct_type, false);
 
                 let mut constr_name_list = vec![];
                 for (union_number, x) in
@@ -183,6 +199,7 @@ impl<'ctx> CodeGen<'ctx> {
                         self,
                         id.clone(),
                         union_number,
+                        &patterns,
                     );
                     self.scopes.add_symbol_to_scope(
                         &self.scope,
@@ -246,8 +263,6 @@ impl<'ctx> CodeGen<'ctx> {
             "name" => {
                 if ast.kind() == "constructor" {
                     let i32_type = self.context.i32_type();
-                    let i8_ptr_type: inkwell::types::PointerType<'_> =
-                        self.context.i8_type().ptr_type(0.into());
 
                     let constructor_key = ast.utf8_text(self.source_code).unwrap();
                     let constructor = self
@@ -257,29 +272,20 @@ impl<'ctx> CodeGen<'ctx> {
                         .get_constructor_template()
                         .unwrap();
                     let tag = constructor.get_tag();
+                    let adt_key = constructor.type_loc.clone();
                     let adt = self
                         .scopes
-                        .get_value_from_scope(&self.scope, &constructor.type_loc)
+                        .get_value_from_scope(&self.scope, &adt_key)
                         .unwrap()
                         .get_adt()
                         .unwrap();
 
                     let tag_value: inkwell::values::IntValue<'_> = i32_type.const_int(tag, false);
-                    let alloca = self.builder.build_alloca(i32_type, "lit_payload").unwrap();
-                    let payload_ptr = self
-                        .builder
-                        .build_bit_cast(alloca, i8_ptr_type, "payload_cast")
-                        .unwrap();
 
                     let undef = adt.type_llvm.get_undef();
-                    let with_tag = self
-                        .builder
-                        .build_insert_value(undef, tag_value, 0, "insert_tag")
-                        .unwrap()
-                        .into_struct_value();
                     let const_struct = self
                         .builder
-                        .build_insert_value(with_tag, payload_ptr, 1, "insert_payload")
+                        .build_insert_value(undef, tag_value, 0, "insert_tag")
                         .unwrap()
                         .into_struct_value();
 
@@ -288,10 +294,7 @@ impl<'ctx> CodeGen<'ctx> {
                         &self.scope,
                         constructor_name.clone(),
                         symbol_types::SymTableEntry::adt_constructor_to_entry(
-                            data_constructors::ConstructorLiteral::new(
-                                const_struct,
-                                constructor_key.to_string(),
-                            ),
+                            data_constructors::ConstructorLiteral::new(const_struct, adt_key),
                         ),
                     );
 

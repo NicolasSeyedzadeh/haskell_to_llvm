@@ -10,15 +10,15 @@ pub struct ADT<'a> {
 }
 #[derive(Clone, Debug)]
 pub struct Constructor {
-    //maybe make this not a vec as it's values are known and not changed at compile time
-    pub fields: Vec<String>,
+    //indexes of the ADTs constructor type
+    pub fields: Vec<usize>,
     pub type_loc: String, //this should be the key of the relevant ADT in the scope they are both within
     union_number: usize,
 }
 #[derive(Clone, Debug)]
 pub struct ConstructorLiteral<'a> {
     pub struct_value: StructValue<'a>,
-    pub template_key: String,
+    pub adt_key: String,
 }
 
 impl<'a> ADT<'a> {
@@ -36,7 +36,7 @@ impl<'a> ADT<'a> {
 }
 
 impl Constructor {
-    pub fn new(fields: Vec<String>, type_loc: String, union_number: usize) -> Self {
+    pub fn new(fields: Vec<usize>, type_loc: String, union_number: usize) -> Self {
         Constructor {
             fields,
             type_loc,
@@ -48,6 +48,7 @@ impl Constructor {
         code_generator: &mut CodeGen<'a>,
         type_loc: String,
         union_number: usize,
+        parent_fields: &Vec<String>,
     ) -> (String, Self) {
         let name = ast
             .child_by_field_name("name")
@@ -62,10 +63,10 @@ impl Constructor {
             //used to have tree_to_children here but the field is duplicated and so we can't easily
             //separate them and the rest of the code doesn't really work with multiple fields for
             //one constructor
-            Some(fields_ast) => vec![fields_ast
-                .utf8_text(code_generator.source_code)
-                .unwrap()
-                .to_string()],
+            Some(fields_ast) => vec![parent_fields
+                .iter()
+                .position(|x| x == fields_ast.utf8_text(code_generator.source_code).unwrap())
+                .unwrap()],
         };
 
         (name, Constructor::new(fields, type_loc, union_number))
@@ -76,25 +77,16 @@ impl Constructor {
 }
 
 impl<'a> ConstructorLiteral<'a> {
-    pub fn new(struct_value: StructValue<'a>, template_key: String) -> Self {
+    pub fn new(struct_value: StructValue<'a>, adt_key: String) -> Self {
         ConstructorLiteral {
             struct_value,
-            template_key,
+            adt_key,
         }
     }
     pub fn get_struct_type<'b>(&self, code_generator: &CodeGen<'b>) -> StructType<'b> {
         code_generator
             .scopes
-            .get_value_from_scope(
-                &code_generator.scope,
-                &code_generator
-                    .scopes
-                    .get_value_from_scope(&code_generator.scope, &self.template_key)
-                    .unwrap()
-                    .get_constructor_template()
-                    .unwrap()
-                    .type_loc,
-            )
+            .get_value_from_scope(&code_generator.scope, &self.adt_key)
             .unwrap()
             .get_adt()
             .unwrap()

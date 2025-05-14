@@ -53,6 +53,11 @@ pub fn compile(source_path: &str, destination: &str) {
     let return_value = i32_type.const_int(0, false);
     let builder = context.create_builder();
     builder.position_at_end(basic_block);
+    // get printf linked from c
+    let printf_type = context
+        .i32_type()
+        .fn_type(&[context.i8_type().ptr_type(0.into()).into()], true);
+    let printf = module.add_function("printf", printf_type, None);
 
     //our code generator object does the work on the AST given all the Inkwell setup
     let code_generator = &mut code_gen_def::CodeGen::new(
@@ -62,6 +67,7 @@ pub fn compile(source_path: &str, destination: &str) {
         function,
         basic_block,
         source_code.as_bytes(),
+        printf,
     );
     for expression in code_ast_split_on_line.iter() {
         println!("compiling: {}\n", expression);
