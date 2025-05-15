@@ -1,12 +1,6 @@
-data Maybe z = None | Some z
+data Result x y =  Err x | Ok y
 
-bind f None = None
-bind f (Some val) = f val
+unwrap (Err error) = error
+unwrap (Ok res) = unwrap res
 
-safediv x 0 = None
-safediv x y = Some (x/y)
-
-ifNone None = print "error: divide by 0"
-ifNone (Some x) = print x
-
-main = ifNone (bind (safediv 25) (bind (safediv 40) (Some 8)))
+main = print (unwrap (Ok (Ok (Ok( (Err 4))))))

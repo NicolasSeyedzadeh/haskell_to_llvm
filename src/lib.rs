@@ -70,7 +70,7 @@ pub fn compile(source_path: &str, destination: &str) {
         printf,
     );
     for expression in code_ast_split_on_line.iter() {
-        println!("compiling: {}\n", expression);
+        //println!("compiling: {}\n", expression);
         code_generator.recursive_compile(expression);
     }
 

@@ -201,8 +201,6 @@ impl<'ctx> CodeGen<'ctx> {
         }
         //if we have a complete application, determine whether we need the switch and execute the ast
         else {
-            println!("function: {}", func_name);
-
             //if theres a jump point, execute the arg and use it as a switch key
             returned_name = match closure_to_apply.jump_points {
                 Some(_) => {

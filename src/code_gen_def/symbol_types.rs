@@ -389,11 +389,7 @@ impl<'a> Closure<'a> {
             let switch_arg = this_closure_switch_key.clone().unwrap();
             code_generator.get_and_evaluate_from_scope(&switch_arg);
 
-            let arg_to_switch = match code_generator
-                .scopes
-                .get_value_from_scope(&code_generator.scope, &switch_arg)
-                .unwrap()
-            {
+            let arg_to_switch = match code_generator.get_and_eval_indirect(&switch_arg) {
                 SymTableEntry::Prim(PrimPtrs::Basic(
                     inkwell::values::BasicValueEnum::IntValue(int),
                 )) => match phis.last() {
@@ -508,10 +504,6 @@ impl<'a> Closure<'a> {
                             &this_closure_switch_key,
                             &self.default_closure.last_pattern(),
                         );
-                        println!("asdnajnda{:?}", this_closure_switch_key);
-                        code_generator
-                            .scopes
-                            ._debug_print_in_scope(&code_generator.scope);
                         let compile_result = code_generator.recursive_compile(&clos.ast);
 
                         result_names_and_blocks.push((compile_result, code_generator.basic_block));
@@ -599,11 +591,19 @@ impl<'a> Closure<'a> {
                                     match x {
                                         //if we have a return value add it to the merge phi
                                         Ok(int) => {
+                                            code_generator
+                                                .builder
+                                                .position_before(&y.get_terminator().unwrap());
+
+                                            code_generator.basic_block = *y;
                                             merge_vals.push((code_generator.get_int(&int), y))
                                         }
                                         //if we don't have a merge value, for every argument build a
                                         //phi for this branch and the entry
                                         Err(scope) => {
+                                            code_generator.position_at_start(entry_block);
+
+                                            code_generator.basic_block = entry_block;
                                             for (phi_vec, pattern) in
                                                 zip(entry_vals.iter_mut(), patterns.clone())
                                             {
