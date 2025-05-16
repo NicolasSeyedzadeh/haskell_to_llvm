@@ -25,13 +25,13 @@ stds = {
 
 samples = ["Simple", "Recursive", "Repeated", "SafeDiv"]
 compilers = list(means.keys())
-x = np.arange(len(samples))  # the label locations
-width = 0.15  # width of each bar
+x = np.arange(len(samples))
+width = 0.15
 
 fig, ax = plt.subplots(figsize=(12, 6))
 
 for i, compiler in enumerate(compilers):
-    offset = (i - 2) * width  # center the bars
+    offset = (i - 2) * width
     ax.bar(
         x + offset,
         means[compiler],
@@ -42,10 +42,8 @@ for i, compiler in enumerate(compilers):
         error_kw={'elinewidth': 1, 'ecolor': 'black'}
     )
 
-# Get current y-ticks
 y_ticks = plt.yticks()[0]
 
-# Add horizontal lines at each y-tick
 for y in y_ticks:
     plt.axhline(y=y, color='lightgray', linestyle='--', linewidth=0.5)
 #ax.set_yscale('log')

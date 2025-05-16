@@ -1,7 +1,5 @@
 import matplotlib.pyplot as plt
 import numpy as np
-
-# Your new dataset (e.g. memory usage in bytes)
 means = {
     "Project Compiler":[15920, 15920, 15920, 15920],
     "GHC Native":  [5678568, 5683632, 5817832, 5679248],
@@ -13,15 +11,13 @@ means = {
 samples = ["Simple", "Recursive", "Repeated", "SafeDiv"]
 
 compilers = list(means.keys())
-x = np.arange(len(samples))  # label locations
-width = 0.15  # width of each bar
+x = np.arange(len(samples))
+width = 0.15
 
-# Create the plot
 fig, ax = plt.subplots(figsize=(12, 6))
 
-# Plot each compiler’s data with offset bars
 for i, compiler in enumerate(compilers):
-    offset = (i - 2) * width  # center bars
+    offset = (i - 2) * width
     ax.bar(
         x + offset,
         means[compiler],
@@ -29,13 +25,10 @@ for i, compiler in enumerate(compilers):
         label=compiler
     )
 
-# Set log scale on y-axis
 ax.set_yscale('log')
 
-# Get current y-ticks
 y_ticks = plt.yticks()[0]
 
-# Add horizontal lines at each y-tick
 for y in y_ticks:
     plt.axhline(y=y, color='lightgray', linestyle='--', linewidth=0.5)
 
