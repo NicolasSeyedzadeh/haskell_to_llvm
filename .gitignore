@@ -3,4 +3,6 @@
 /evaluation/Sample2/outputs
 /evaluation/Sample3/outputs
 /evaluation/Sample4/outputs
+/evaluation/results_plot/*.png
+
 /src/*.txt
