@@ -1,3 +1,6 @@
 /target
-/evaluation
-/src/haskell_hold.txt
+/evaluation/Sample1/outputs
+/evaluation/Sample2/outputs
+/evaluation/Sample3/outputs
+/evaluation/Sample4/outputs
+/src/*.txt
