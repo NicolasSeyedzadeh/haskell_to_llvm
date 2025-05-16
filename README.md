@@ -1,5 +1,7 @@
 # Direct Haskell to LLVM IR compiler
 
+A lightweight Rusty compiler that translates a subset of Haskell directly to LLVM IR.
+
 ## Usage
 
 After compiling the Rust code with `cargo build --release` at the top level directory, you can then
@@ -45,3 +47,7 @@ Samplex/ - Contains the Haskell program outlined in the dissertation and their t
 and OCaml versions.
 
 results_plot/ - contains python files that plot the results of the evaluation.
+
+## License
+
+This project is licensed under the MIT License.
